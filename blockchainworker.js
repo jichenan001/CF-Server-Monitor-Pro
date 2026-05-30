@@ -206,7 +206,6 @@ export default {
                 const block = await request.json();
                 const currentSlot = Math.max(1, Math.floor((Date.now() - EPOCH_START) / 3000));
                 
-                // 拒绝来自未来时间的恶意区块
                 if (parseInt(block.slot_id) > currentSlot + 2) {
                     return new Response('Block from future rejected', { status: 400 });
                 }
@@ -245,7 +244,6 @@ export default {
             const currentSlot = Math.max(1, Math.floor((Date.now() - EPOCH_START) / 3000));
             const hash = await miniHash(`${currentSlot}-${host}`);
             
-            // 大幅降低挖矿难度，只要哈希尾数<=12(约81%概率)就能出块，保证小网络也能快速爆块推进高度
             if (parseInt(hash.slice(-1), 16) <= 12) {
                 const payloadStr = JSON.stringify({ vps_count: localVpsCount, total_asset: localAsset });
                 const blockData = { slot_id: currentSlot, proposer_domain: host, block_hash: hash, payload: payloadStr };
@@ -257,17 +255,16 @@ export default {
                 await env.DB.prepare(`INSERT OR REPLACE INTO blockchain_ledger (slot_id, proposer_domain, block_hash, payload, timestamp) VALUES (?, ?, ?, ?, ?)`).bind(currentSlot, host, hash, payloadStr, Date.now()).run();
             }
 
-            // 大幅提升拉取同步数据的频率，保证网络区块高度一致
-            if (Math.random() < 0.6) {
-                const { results: beacons } = await env.DB.prepare(`SELECT domain FROM blockchain_peers WHERE is_beacon IN ('true', '1') ORDER BY RANDOM() LIMIT 1`).all();
-                if (beacons.length > 0) {
-                    const localTop = await env.DB.prepare('SELECT slot_id FROM blockchain_ledger ORDER BY slot_id DESC LIMIT 1').first();
-                    const since = localTop ? localTop.slot_id : 0;
-                    const syncRes = await fetch(`${beacons[0].domain}/api/consensus/sync?since_slot=${since}`);
-                    if(syncRes.ok) {
+            // 【强制同步协议】：确保高度迅速对齐
+            const syncFromPeer = async (peerDomain) => {
+                const localTop = await env.DB.prepare('SELECT slot_id FROM blockchain_ledger ORDER BY slot_id DESC LIMIT 1').first();
+                const since = localTop ? localTop.slot_id : 0;
+                try {
+                    const syncRes = await fetch(`${peerDomain}/api/consensus/sync?since_slot=${since}`);
+                    if (syncRes.ok) {
                         const syncData = await syncRes.json();
-                        for(const b of syncData.blocks) {
-                            if(b.slot_id <= currentSlot + 2) {
+                        for (const b of syncData.blocks) {
+                            if (b.slot_id <= currentSlot + 2) {
                                 await env.DB.prepare(`INSERT OR REPLACE INTO blockchain_ledger (slot_id, proposer_domain, block_hash, payload, timestamp) VALUES (?, ?, ?, ?, ?)`).bind(b.slot_id, b.proposer_domain, b.block_hash, b.payload, b.timestamp).run();
                                 const pl = JSON.parse(b.payload);
                                 await env.DB.prepare(`INSERT INTO blockchain_peers (domain, vps_count, total_asset, last_seen) VALUES (?, ?, ?, ?) ON CONFLICT(domain) DO UPDATE SET vps_count=excluded.vps_count, total_asset=excluded.total_asset, last_seen=excluded.last_seen`).bind(b.proposer_domain, parseInt(pl.vps_count)||0, parseFloat(pl.total_asset)||0, b.timestamp).run();
@@ -281,8 +278,20 @@ export default {
                             `).bind(p.domain, p.is_beacon, p.last_seen, p.reputation_score).run();
                         }
                     }
-                }
+                } catch(e) {}
+            };
+
+            // 每 5 秒心跳必然向种子节点请求同步，消除断层
+            if (host !== SEED_NODE) {
+                await syncFromPeer(SEED_NODE);
             }
+            
+            // 随机找一个其他节点互相同步
+            if (Math.random() < 0.5) {
+                const { results: rBeacons } = await env.DB.prepare(`SELECT domain FROM blockchain_peers WHERE is_beacon IN ('true', '1') AND domain != ? ORDER BY RANDOM() LIMIT 1`).bind(host).all();
+                if (rBeacons.length > 0) await syncFromPeer(rBeacons[0].domain);
+            }
+
         } catch(e) {}
     };
 
@@ -1906,13 +1915,12 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
 
         ctx.waitUntil(checkOfflineNodes());
         
-        // Web3: 统计本节点最新的总资产，触发去中心化共识出块
+        // Web3 共识出块与强制广播同步
         const { results: allS } = await env.DB.prepare('SELECT price, expire_date FROM servers WHERE is_hidden="false"').all();
         let currentAsset = 0;
         for(const s of allS) {
             currentAsset += calcServerAsset(s, nowMs).amount;
         }
-        
         ctx.waitUntil(mineAndGossip(currentAsset, allS.length));
 
         return new Response(`INTERVAL=${sys.report_interval || '5'}|CT=${sys.ping_node_ct || 'default'}|CU=${sys.ping_node_cu || 'default'}|CM=${sys.ping_node_cm || 'default'}`, { status: 200 });
@@ -2165,7 +2173,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
       }
 
       // ----------------------------------------
-      // 大盘聚合首页 (包含卡片、表格、地图功能)
+      // 大盘聚合首页 (包含卡片、表格、地图、区块功能)
       // ----------------------------------------
       let { results } = await env.DB.prepare('SELECT * FROM servers').all();
       results = results.filter(s => s.is_hidden !== 'true');
@@ -2217,7 +2225,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
         }
       }
 
-      // Web3 获取去中心化排名与节点数量 (引入活性淘汰机制)
+      // Web3 获取去中心化排名 (本地动态对比) 结合心跳活性淘汰
       let localRank = 1;
       let globalNetAsset = totalAsset;
       let globalProposer = '--';
@@ -2226,10 +2234,8 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
       let globalNodes = 1;
       
       try {
-          // 设定存活阈值：只承认最近 5 分钟内有心跳的节点 (5 * 60 * 1000)
           const activeThreshold = Date.now() - 300000; 
           
-          // 修复 1：只拉取存活节点的资产参与排名
           const { results: rankList } = await env.DB.prepare('SELECT domain, total_asset FROM blockchain_peers WHERE last_seen > ?').bind(activeThreshold).all();
           let higherCount = 0;
           let otherAssets = 0;
@@ -2242,7 +2248,6 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
               }
           }
           
-          // 如果自己没在活跃列表里，把自己加上
           localRank = higherCount + 1;
           globalNetAsset = totalAsset + otherAssets;
           
@@ -2252,11 +2257,9 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
               globalProposer = latestBlock.proposer_domain.replace('https://', '');
           }
 
-          // 修复 2：信标数量只统计活着的
           const bCountRow = await env.DB.prepare('SELECT count(*) as c FROM blockchain_peers WHERE is_beacon IN ("true", "1") AND last_seen > ?').bind(activeThreshold).first();
           activeBeacons = bCountRow ? bCountRow.c : 0;
           
-          // 修复 3：全网节点总数只统计活着的
           const nCountRow = await env.DB.prepare('SELECT count(*) as c FROM blockchain_peers WHERE last_seen > ?').bind(activeThreshold).first();
           globalNodes = nCountRow && nCountRow.c > 0 ? nCountRow.c : 1;
       } catch(e) {
@@ -2375,9 +2378,10 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
               </a>
             `;
 
+            // 【核心修复】状态表格栏采用强色彩文字防遮挡
             tableBodyHtml += `
               <tr onclick="window.location.href='/?id=${server.id}'" style="cursor:pointer;" data-country="${cCode}">
-                <td style="text-align:center;"><div class="status-dot" style="background:${statusColor}; display:inline-block; margin:0;"></div></td>
+                <td style="text-align:center; font-weight:bold; color:${statusColor}; font-size:12px;">${isOnline ? '在线' : '离线'}</td>
                 <td><b>${server.name}</b></td>
                 <td>${flagHtml}</td>
                 <td><span class="os-text">${server.os || '-'} / ${server.arch || '-'} / ${server.virt || '-'}</span></td>
@@ -2410,6 +2414,26 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
         }
       }
 
+      // 【核心新增】提取最新区块生成区块链浏览器表格
+      let blockExplorerRows = '';
+      try {
+          const { results: recentBlocks } = await env.DB.prepare('SELECT * FROM blockchain_ledger ORDER BY slot_id DESC LIMIT 50').all();
+          for (const b of recentBlocks) {
+              const bDate = new Date(b.timestamp + 8*3600000).toISOString().replace('T',' ').substring(0, 19);
+              const proposerLink = b.proposer_domain.startsWith('http') ? b.proposer_domain : 'https://' + b.proposer_domain;
+              blockExplorerRows += `<tr>
+                  <td><b style="color:#10b981;"># ${b.slot_id}</b></td>
+                  <td><a href="${proposerLink}" target="_blank" style="color:#3b82f6; text-decoration:none; font-weight:600;">${b.proposer_domain.replace('https://', '')}</a></td>
+                  <td style="font-family:monospace; font-size:11px; color:#8b949e;">${b.block_hash}</td>
+                  <td style="color:#64748b; font-size:12px;">${bDate}</td>
+              </tr>`;
+          }
+      } catch(e){}
+      if (!blockExplorerRows) blockExplorerRows = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#888;">暂无区块数据，等待网络共识...</td></tr>';
+
+      // =====================================
+      // 完整无截断的 Ajax 和 HTML 返回
+      // =====================================
       if (isAjax) {
           const ajaxResponse = `
              <div id="ajax-stats-payload" data-rank="${localRank}" data-net-asset="${globalNetAsset.toFixed(2)}" data-proposer="${globalProposer}" data-height="${currentHeight}" data-beacons="${activeBeacons}" data-nodes="${globalNodes}" style="display:none;"></div>
@@ -2422,6 +2446,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
              <div id="ajax-filters" style="display:none;">${filterTagsHtml}</div>
              <div id="ajax-cards">${cardContentHtml}</div>
              <tbody id="ajax-table" style="display:none;">${tableBodyHtml || '<tr><td colspan="11" style="text-align:center;">暂无数据</td></tr>'}</tbody>
+             <tbody id="ajax-blocks" style="display:none;">${blockExplorerRows}</tbody>
              <script id="map-data" type="application/json">${JSON.stringify(countryStats)}</script>
           `;
           return new Response(ajaxResponse, { headers: { 'Content-Type': 'text/html' } });
@@ -2449,6 +2474,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
           .theme2 .ticker-bar, .theme5 .ticker-bar { background: #30363d; }
           .theme2 .ticker-fill, .theme5 .ticker-fill { background: #58a6ff; }
           
+          /* 毛玻璃主题防重叠强覆盖 */
           .theme4 .consensus-panel { background: rgba(255, 255, 255, 0.15); border-color: rgba(255, 255, 255, 0.3); backdrop-filter: blur(10px); color: #fff; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
           .theme4 .c-label { color: rgba(255, 255, 255, 0.9); text-shadow: 0 1px 2px rgba(0,0,0,0.2); }
           .theme4 .c-val { color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
@@ -2487,6 +2513,9 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
                 </button>
                 <button class="toggle-btn" id="btn-map" onclick="switchView('map')">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"></polygon><line x1="9" y1="3" x2="9" y2="21"></line><line x1="15" y1="3" x2="15" y2="21"></line></svg> 地图
+                </button>
+                <button class="toggle-btn" id="btn-block" onclick="switchView('block')">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg> 链上区块
                 </button>
               </div>
               <a href="/admin" class="admin-btn">${sys.admin_title}</a>
@@ -2539,6 +2568,19 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
 
           <div id="view-map" class="view-panel">
             <div id="map-container"></div>
+          </div>
+
+          <div id="view-block" class="view-panel">
+            <div class="table-responsive" style="background:white; border-radius:12px; padding:10px; box-shadow:0 2px 8px rgba(0,0,0,0.04);">
+              <table class="custom-table">
+                <thead>
+                  <tr><th>区块高度 (Slot)</th><th>出块见证人 (Proposer)</th><th>区块哈希 (Hash)</th><th>见证时间 (UTC+8)</th></tr>
+                </thead>
+                <tbody id="table-blocks-body">
+                  ${blockExplorerRows}
+                </tbody>
+              </table>
+            </div>
           </div>
           
           ${getFooterHtml(sys)}
@@ -2730,6 +2772,9 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
               
               const newTable = newDoc.getElementById('ajax-table');
               if (newTable) document.getElementById('ajax-table').innerHTML = newTable.innerHTML;
+
+              const newBlocks = newDoc.getElementById('ajax-blocks');
+              if (newBlocks && document.getElementById('table-blocks-body')) document.getElementById('table-blocks-body').innerHTML = newBlocks.innerHTML;
               
               const newFilters = newDoc.getElementById('ajax-filters');
               if (newFilters) document.getElementById('ajax-filters').innerHTML = newFilters.innerHTML;
@@ -2740,7 +2785,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
               drawMarkers();
               applyFilter(); 
             } catch (e) {}
-          }, 3000); // 配合高频出块，将前台刷新调快为 3秒
+          }, 3500); 
         </script>
         
         ${sys.custom_script || ''}
