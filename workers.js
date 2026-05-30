@@ -166,6 +166,46 @@ export default {
     };
 
     // ==========================================
+    // ✨ 方案 A：状态根哈希投影 (State Root Generator)
+    // 采用 SHA-256 计算当前余额树的确切状态快照
+    // ==========================================
+    const computeStateRoot = async (txs) => {
+      const { results: wallets } = await env.DB.prepare('SELECT address, balance FROM blockchain_wallets').all();
+      let balances = {};
+      for (const w of wallets) {
+        if (w.balance > 0) balances[w.address] = w.balance;
+      }
+      
+      // 在内存中严格推演即将打包的交易 (模拟下一区块的状态)
+      if (txs && Array.isArray(txs)) {
+        for (const tx of txs) {
+          if (!tx || !tx.id) continue;
+          const amount = parseFloat(tx.amount) || 0;
+          if (amount <= 0) continue;
+
+          if (tx.from) {
+            const currentFromBal = balances[tx.from] || 0;
+            if (currentFromBal < amount) continue; // 余额不足在内存预演中剔除
+            balances[tx.from] = currentFromBal - amount;
+            if (balances[tx.from] <= 0) delete balances[tx.from];
+          }
+          if (tx.to) {
+            balances[tx.to] = (balances[tx.to] || 0) + amount;
+          }
+        }
+      }
+      
+      // 字典序排序地址保证确定性
+      const sortedAddrs = Object.keys(balances).sort();
+      const stateStr = sortedAddrs.map(addr => `${addr}:${balances[addr].toFixed(6)}`).join('|');
+      
+      const msgUint8 = new TextEncoder().encode(stateStr);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    };
+
+    // ==========================================
     // 🏆 终极版核心：状态机一致性投影与零闪烁差分覆盖 (Zero-Flicker Upsert)
     // 彻底解决一切余额随机跳动、读写竞态条件和不同步的元凶
     // ==========================================
@@ -355,11 +395,34 @@ export default {
                     return new Response('Block from future rejected', { status: 400 });
                 }
 
+                // --- 新增：防范伪造区块 DoS ---
+                const expectedHash = await miniHash(`${block.slot_id}-${block.proposer_domain}-${block.payload}`);
+                if (expectedHash !== block.block_hash || parseInt(expectedHash.slice(-1), 16) > 14) {
+                    return new Response('Invalid Block Hash / PoW Failed', { status: 400 });
+                }
+
                 const currentBlock = await env.DB.prepare('SELECT block_hash FROM blockchain_ledger WHERE slot_id = ?').bind(block.slot_id).first();
                 let isStateChanged = false;
                 
                 const pl = JSON.parse(block.payload);
                 const safeTotalAsset = Math.min(parseFloat(pl.total_asset)||0, 500000); 
+
+                // --- ✨ 方案 A 核心：State Root 投影验证 ---
+                // 如果外来区块包含 state_root，我们在本地预演算指纹进行校验
+                if (pl.state_root) {
+                    const localExpectedRoot = await computeStateRoot(pl.txs || []);
+                    if (localExpectedRoot !== pl.state_root) {
+                        console.error(`🚨 State Root Mismatch! Local: ${localExpectedRoot} | Block: ${pl.state_root}`);
+                        // 发现自己算出的状态与区块状态不一致，说明本地产生严重分叉或脏数据！
+                        // 触发护城河：立刻抹除受损数据，进入强制拉回基石同步模式 (Rollback & Clean Sync)
+                        await env.DB.prepare('DELETE FROM blockchain_ledger').run();
+                        await env.DB.prepare('DELETE FROM blockchain_wallets').run();
+                        await env.DB.prepare('DELETE FROM mempool').run();
+                        await env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('rebuild_ledger', 'true') ON CONFLICT(key) DO UPDATE SET value='true'`).run();
+                        return new Response('State Root Mismatch! Local ledger corrupted, Rollback & Clean Sync triggered.', { status: 409, headers: {'Access-Control-Allow-Origin':'*'} });
+                    }
+                }
+                // ------------------------------------------
 
                 // 处理追加与分叉覆盖
                 if (!currentBlock) {
@@ -423,7 +486,11 @@ export default {
                 blockTxs.push({ id: coinbaseId, type: 'COINBASE', to: sys.miner_wallet, amount: 1, timestamp: Date.now() });
             }
 
-            const payloadStr = JSON.stringify({ vps_count: localVpsCount, total_asset: localAsset, txs: blockTxs });
+            // --- ✨ 方案 A 核心：写入投影指纹 ---
+            const state_root = await computeStateRoot(blockTxs);
+            const payloadStr = JSON.stringify({ vps_count: localVpsCount, total_asset: localAsset, txs: blockTxs, state_root: state_root });
+            // ---------------------------------
+
             const hash = await miniHash(`${currentSlot}-${host}-${payloadStr}`);
             
             if (parseInt(hash.slice(-1), 16) <= 14) {
@@ -1528,7 +1595,7 @@ cq-ct-dualstack.ip.zstaticcdn.com:80`;
       const buildOpts = (group, selectedVal) => {
           let opts = `<option value="default" ${selectedVal === 'default' ? 'selected' : ''}>默认节点 (双栈多节点轮询)</option>`;
           group.forEach(n => {
-             opts += `<option value="${n.host}" ${selectedVal === n.host ? 'selected' : ''}>${n.name}</option>`;
+              opts += `<option value="${n.host}" ${selectedVal === n.host ? 'selected' : ''}>${n.name}</option>`;
           });
           return opts;
       };
@@ -2661,7 +2728,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
             if (sys.show_price === 'true') {
               let priceHtml = `价格: ${server.price || '免费'}`;
               if (sys.show_asset === 'true' && server._amount > 0) {
-                  priceHtml += ` <span style="color:#8b5cf6;font-weight:600;margin-left:8px;">剩余价值: ${server._remValue.toFixed(2)}${sys.asset_currency || '元'}</span>`;
+                priceHtml += ` <span style="color:#8b5cf6;font-weight:600;margin-left:8px;">剩余价值: ${server._remValue.toFixed(2)}${sys.asset_currency || '元'}</span>`;
               }
               metaHtml += `<div class="card-meta" style="margin-top:8px;">${priceHtml}</div>`;
             }
@@ -3128,7 +3195,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
             'ES': [40.46, -3.74], 'PL': [51.91, 19.14], 'FI': [61.92, 25.74], 'NO': [60.47, 8.46], 
             'DK': [56.26, 9.50], 'IE': [53.14, -7.69], 'AT': [47.51, 14.55], 'TR': [38.96, 35.24], 
             'AE': [23.42, 53.84], 'MY': [4.21, 101.97], 'TH': [15.87, 100.99], 'VN': [14.05, 108.27], 
-            'PH': [12.87, 121.77], 'ID': [-0.78, 113.92] 
+            'PH': [12.87,121.77], 'ID': [-0.78, 113.92] 
           };
           const iso2To3 = { 
             "US":"USA","CN":"CHN","JP":"JPN","HK":"HKG","SG":"SGP","KR":"KOR","DE":"DEU","GB":"GBR", 
