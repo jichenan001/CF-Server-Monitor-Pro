@@ -153,7 +153,7 @@ export default {
         return { amount, remValue };
     };
 
-    // 执行状态机交易结算
+    // 状态机交易结算
     const processBlockTransactions = async (txs) => {
         if (!txs || !Array.isArray(txs)) return;
         for (const tx of txs) {
@@ -200,13 +200,26 @@ export default {
       tg_notify: 'false', tg_bot_token: '', tg_chat_id: '',
       auto_reset_traffic: 'false', report_interval: '5',
       ping_node_ct: 'default', ping_node_cu: 'default', ping_node_cm: 'default',
-      miner_wallet: '' // 矿工钱包地址
+      miner_wallet: '' 
     };
 
     try {
       const { results } = await env.DB.prepare('SELECT * FROM settings').all();
       if (results && results.length > 0) results.forEach(r => sys[r.key] = r.value);
     } catch (e) {}
+
+    // ==========================================
+    // 轻量化链上账本 API
+    // ==========================================
+    if (request.method === 'GET' && url.searchParams.get('action') === 'balance') {
+        const addr = url.searchParams.get('address') || '';
+        try {
+            const wallet = await env.DB.prepare('SELECT balance FROM blockchain_wallets WHERE address = ?').bind(addr).first();
+            return new Response(JSON.stringify({ balance: wallet ? wallet.balance : 0 }), { headers: {'Content-Type':'application/json'} });
+        } catch(e) {
+            return new Response(JSON.stringify({ balance: 0 }), { headers: {'Content-Type':'application/json'} });
+        }
+    }
 
     // ==========================================
     // Web3 共识网络核心路由
@@ -270,25 +283,43 @@ export default {
                     await env.DB.prepare(`
                         INSERT INTO blockchain_peers (domain, vps_count, total_asset, last_seen) 
                         VALUES (?, ?, ?, ?) 
-                        ON CONFLICT(domain) DO UPDATE SET vps_count=excluded.vps_count, total_asset=excluded.total_asset, last_seen=excluded.last_seen
+                        ON CONFLICT(domain) DO UPDATE SET vps_count=excluded.vps_count, total_asset=excluded.last_seen
                     `).bind(block.proposer_domain, parseInt(pl.vps_count)||0, parseFloat(pl.total_asset)||0, Date.now()).run();
                     
-                    // 状态机结算
                     if (pl.txs) await processBlockTransactions(pl.txs);
                 }
                 return new Response('Consensus Accepted', { status: 200, headers: {'Access-Control-Allow-Origin':'*'} });
             } catch(e) { return new Response('Block Reject', { status: 400 }); }
         }
-        
-        // 接收广播交易进入内存池
+
         if (request.method === 'POST' && route === 'tx') {
             try {
-                const tx = await request.json();
-                if (tx.id && tx.from && tx.to && tx.amount) {
-                    await env.DB.prepare(`INSERT OR IGNORE INTO mempool (tx_id, payload, timestamp) VALUES (?, ?, ?)`).bind(tx.id, JSON.stringify(tx), Date.now()).run();
+                const data = await request.json();
+                const tx = data.tx;
+                const signature = data.signature;
+
+                if (!tx || !tx.from || !tx.to || !tx.amount) throw new Error("Invalid Tx Payload");
+
+                if (signature) {
+                    const { verifyMessage } = await import('https://esm.sh/ethers@6.11.1');
+                    const msgToSign = `${tx.from}:${tx.to}:${tx.amount}:${tx.timestamp}`;
+                    const recoveredAddress = verifyMessage(msgToSign, signature);
+                    
+                    if (recoveredAddress.toLowerCase() !== tx.from.toLowerCase()) {
+                        throw new Error("Signature verification failed");
+                    }
+                    
+                    const wallet = await env.DB.prepare('SELECT balance FROM blockchain_wallets WHERE address = ?').bind(tx.from).first();
+                    if (!wallet || wallet.balance < tx.amount) {
+                        throw new Error("Insufficient balance");
+                    }
                 }
+
+                await env.DB.prepare(`INSERT OR IGNORE INTO mempool (tx_id, payload, timestamp) VALUES (?, ?, ?)`).bind(tx.id, JSON.stringify(tx), Date.now()).run();
                 return new Response('Tx Accepted', { status: 200, headers: {'Access-Control-Allow-Origin':'*'} });
-            } catch(e) { return new Response('Tx Reject', { status: 400 }); }
+            } catch(e) { 
+                return new Response('Tx Reject: ' + e.message, { status: 400, headers: {'Access-Control-Allow-Origin':'*'} }); 
+            }
         }
     }
 
@@ -298,11 +329,9 @@ export default {
             const hash = await miniHash(`${currentSlot}-${host}`);
             
             if (parseInt(hash.slice(-1), 16) <= 14) {
-                // 打包内存池中的交易
                 const { results: pendingTxs } = await env.DB.prepare('SELECT payload FROM mempool ORDER BY timestamp ASC LIMIT 20').all();
                 let blockTxs = pendingTxs.map(t => JSON.parse(t.payload));
                 
-                // 出块奖励 1 Cycle
                 if (sys.miner_wallet) {
                     blockTxs.push({ id: crypto.randomUUID(), type: 'COINBASE', to: sys.miner_wallet, amount: 1, timestamp: Date.now() });
                 }
@@ -316,7 +345,6 @@ export default {
                 }
                 await env.DB.prepare(`INSERT OR REPLACE INTO blockchain_ledger (slot_id, proposer_domain, block_hash, payload, timestamp) VALUES (?, ?, ?, ?, ?)`).bind(currentSlot, host, hash, payloadStr, Date.now()).run();
                 
-                // 本地执行结算
                 await processBlockTransactions(blockTxs);
             }
 
@@ -387,7 +415,7 @@ export default {
 
         for (const s of allServers) {
           const diff = now - s.last_updated;
-          const isOffline = diff > OFFLINE_THRESHOLD; // 5分钟判定
+          const isOffline = diff > OFFLINE_THRESHOLD; 
 
           if (isOffline && !alertState[s.id]) {
             await sendTelegram(`⚠️ <b>节点离线告警</b>\n\n<b>节点名称:</b> ${s.name}\n<b>状态:</b> 离线 (超过5分钟未上报)\n<b>时间:</b> ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`);
@@ -571,12 +599,6 @@ export default {
           `).bind(data.name || 'Unnamed', data.server_group || '默认分组', data.price || '', data.expire_date || '', data.bandwidth || '', data.traffic_limit || '', data.agent_os || 'debian', data.is_hidden || 'false', data.id).run();
           return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
         }
-        else if (data.action === 'send_tx') {
-          if (!data.from || !data.to || !data.amount) throw new Error("Missing params");
-          const txData = { id: crypto.randomUUID(), type: 'TRANSFER', from: data.from, to: data.to, amount: parseFloat(data.amount), timestamp: Date.now() };
-          await env.DB.prepare(`INSERT OR IGNORE INTO mempool (tx_id, payload, timestamp) VALUES (?, ?, ?)`).bind(txData.id, JSON.stringify(txData), txData.timestamp).run();
-          return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
-        }
       } catch (e) {
         return new Response(JSON.stringify({ error: e.message }), { status: 400 });
       }
@@ -622,8 +644,10 @@ export default {
 
       let walletBalance = 0;
       if (sys.miner_wallet) {
-          const w = await env.DB.prepare('SELECT balance FROM blockchain_wallets WHERE address = ?').bind(sys.miner_wallet).first();
-          if (w) walletBalance = w.balance;
+          try {
+              const w = await env.DB.prepare('SELECT balance FROM blockchain_wallets WHERE address = ?').bind(sys.miner_wallet).first();
+              if (w) walletBalance = w.balance;
+          } catch(e) {}
       }
 
       const rawNodeDataV4 = `陕西西安移动
@@ -1324,6 +1348,7 @@ cq-ct-dualstack.ip.zstaticcdn.com:80`;
       <head>
         <meta charset="UTF-8">
         <title>${sys.admin_title}</title>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.11.1/ethers.umd.min.js"></script>
         <style>
           body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 20px; background: #f0f2f5; color: #333;}
           .card { background: white; padding: 25px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); max-width: 1100px; margin: 0 auto 20px auto; }
@@ -1333,7 +1358,7 @@ cq-ct-dualstack.ip.zstaticcdn.com:80`;
           th { background: #f8f9fa; }
           .btn { cursor: pointer; border-radius: 4px; font-size: 13px; transition: opacity 0.2s; border: none; padding: 6px 10px; color: white; margin-left: 5px; }
           .btn:hover { opacity: 0.8; }
-          .btn-blue { background: #3b82f6; } .btn-green { background: #10b981; } .btn-red { background: #ef4444; } .btn-gray { background: #6b7280; } .btn-purple { background: #8b5cf6; }
+          .btn-blue { background: #3b82f6; } .btn-green { background: #10b981; } .btn-red { background: #ef4444; } .btn-gray { background: #6b7280; } .btn-purple { background: #8b5cf6; } .btn-orange { background: #f59e0b; }
           .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
           .form-group { display: flex; flex-direction: column; margin-bottom: 15px; }
           .form-group label { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: #555;}
@@ -1360,14 +1385,17 @@ cq-ct-dualstack.ip.zstaticcdn.com:80`;
           </div>
           
           <div style="background:#f3e8ff; padding:15px; border-radius:8px; border:1px solid #e9d5ff; margin-bottom:20px;">
-            <h3 style="margin-top:0; color:#6b21a8;">💼 Web3 钱包与转账 (Cycle Ledger)</h3>
+            <h3 style="margin-top:0; color:#6b21a8; display:flex; justify-content:space-between; align-items:center;">
+                💼 Web3 钱包与转账 (Cycle Ledger)
+                <button onclick="connectMetaMask()" class="btn btn-orange" style="font-size:12px; padding:4px 8px;">🦊 快速连接 MetaMask</button>
+            </h3>
             <div class="form-group">
                 <label>本站出块奖励收款钱包地址 (自动挖矿 Cycle)</label>
-                <input type="text" id="cfg_miner_wallet" value="${sys.miner_wallet || ''}" placeholder="例如输入自定义字符串或公钥">
+                <input type="text" id="cfg_miner_wallet" value="${sys.miner_wallet || ''}" placeholder="例如输入自定义字符串或 0x 公钥">
             </div>
             <div style="display:flex; justify-content:space-between; align-items:center;">
                 <span style="font-size:16px; font-weight:bold; color:#7e22ce;">当前余额: ${walletBalance} Cycle</span>
-                <button onclick="openTxModal()" class="btn btn-purple">发起转账 (Tx)</button>
+                <button onclick="openTxModal()" class="btn btn-purple">发起签名转账 (Tx)</button>
             </div>
           </div>
 
@@ -1518,13 +1546,16 @@ cq-ct-dualstack.ip.zstaticcdn.com:80`;
 
         <div id="txModal" class="modal">
           <div class="modal-content">
-            <h3 style="margin-top:0; color:#7e22ce;">💸 发送 Cycle 点</h3>
-            <label>发送方地址 (From)</label> <input type="text" id="txFrom" value="${sys.miner_wallet || ''}" readonly style="background:#f3f4f6;">
-            <label>接收方地址 (To)</label> <input type="text" id="txTo" placeholder="输入对方地址">
-            <label>转账数量 (Amount)</label> <input type="number" id="txAmount" placeholder="输入 Cycle 数量" min="0.1" step="0.1">
+            <h3 style="margin-top:0; color:#7e22ce;">💸 签名并广播 Cycle 交易</h3>
+            <label>发送方地址 (From) <span style="font-weight:normal;color:#888;font-size:12px;">(若修改需重新连接小狐狸)</span></label> 
+            <input type="text" id="txFrom" value="${sys.miner_wallet || ''}" style="background:#f9fafb;">
+            <label>接收方地址 (To)</label> 
+            <input type="text" id="txTo" placeholder="输入接收方 EVM 0x...地址">
+            <label>转账数量 (Amount Cycle)</label> 
+            <input type="number" id="txAmount" placeholder="输入 Cycle 数量" min="0.1" step="0.1">
             <div style="text-align: right; margin-top: 15px;">
               <button onclick="closeTxModal()" style="padding: 8px 15px; border: 1px solid #ccc; background: white; margin-right: 5px; cursor:pointer;">取消</button>
-              <button onclick="sendTx()" class="btn btn-purple" style="padding: 8px 15px;">广播交易</button>
+              <button onclick="sendTxMetaMask()" class="btn btn-orange" style="padding: 8px 15px;">🦊 签名并广播</button>
             </div>
           </div>
         </div>
@@ -1559,6 +1590,57 @@ cq-ct-dualstack.ip.zstaticcdn.com:80`;
         ${getFooterHtml(sys)}
 
         <script>
+          async function connectMetaMask() {
+            if (!window.ethereum) return alert('检测不到钱包插件，请安装 MetaMask 或使用手机钱包内嵌浏览器。');
+            try {
+              const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+              document.getElementById('cfg_miner_wallet').value = accounts[0];
+              document.getElementById('txFrom').value = accounts[0];
+              alert('🦊 MetaMask 已连接，钱包地址已自动填入！');
+            } catch(e) { alert('连接失败: ' + e.message); }
+          }
+
+          async function sendTxMetaMask() {
+              if (!window.ethereum) return alert('请安装 MetaMask 并连接');
+              const to = document.getElementById('txTo').value;
+              const amount = document.getElementById('txAmount').value;
+              const fromInput = document.getElementById('txFrom').value;
+              if(!to || !amount || !fromInput) return alert('请完整填写转账信息');
+
+              try {
+                  const provider = new ethers.BrowserProvider(window.ethereum);
+                  const signer = await provider.getSigner();
+                  const address = await signer.getAddress();
+                  
+                  if (address.toLowerCase() !== fromInput.toLowerCase()) {
+                      return alert('您当前 MetaMask 选中的账户与 From 地址不一致，请切换账户！');
+                  }
+
+                  const txData = { id: crypto.randomUUID(), type: 'TRANSFER', from: address, to: to, amount: parseFloat(amount), timestamp: Date.now() };
+                  
+                  // Web3 规范签名防重放拼接
+                  const msgToSign = \`\${txData.from}:\${txData.to}:\${txData.amount}:\${txData.timestamp}\`;
+                  const signature = await signer.signMessage(msgToSign);
+
+                  const payload = { tx: txData, signature: signature };
+                  const res = await fetch('/api/consensus/tx', { 
+                      method: 'POST', 
+                      headers: {'Content-Type': 'application/json'}, 
+                      body: JSON.stringify(payload) 
+                  });
+                  
+                  if (res.ok) {
+                      alert('🚀 签名成功！交易已广播到网络内存池，等待打包。');
+                      closeTxModal();
+                  } else {
+                      const err = await res.text();
+                      alert('交易广播被拒绝: ' + err);
+                  }
+              } catch (error) {
+                  alert('签名被取消或发生错误: ' + error.message);
+              }
+          }
+
           function toggleCustomCss() {
             const theme = document.getElementById('cfg_theme').value;
             document.getElementById('custom_css_group').style.display = theme === 'theme6' ? 'flex' : 'none';
@@ -1622,22 +1704,6 @@ cq-ct-dualstack.ip.zstaticcdn.com:80`;
           }
           function closeTxModal() { document.getElementById('txModal').style.display = 'none'; }
 
-          async function sendTx() {
-              const to = document.getElementById('txTo').value;
-              const amount = document.getElementById('txAmount').value;
-              if(!to || !amount) return alert('请完整填写转账信息');
-              
-              const res = await fetch('/admin/api', { 
-                  method: 'POST', 
-                  headers: { 'Content-Type': 'application/json' }, 
-                  body: JSON.stringify({ action: 'send_tx', from: document.getElementById('txFrom').value, to: to, amount: amount }) 
-              });
-              if (res.ok) {
-                  alert('🚀 交易已发送至内存池，等待网络打包出块结算！');
-                  closeTxModal();
-              } else alert('转账请求失败');
-          }
-
           async function addServer() {
             const name = document.getElementById('newName').value;
             const agentOs = document.getElementById('newOs').value;
@@ -1670,13 +1736,10 @@ cq-ct-dualstack.ip.zstaticcdn.com:80`;
           function closeModal() { document.getElementById('editModal').style.display = 'none'; }
           async function saveEdit() {
             const data = {
-              action: 'edit', 
-              id: document.getElementById('editId').value,
-              name: document.getElementById('editName').value,
-              agent_os: document.getElementById('editOs').value,
-              server_group: document.getElementById('editGroup').value, price: document.getElementById('editPrice').value,
-              expire_date: document.getElementById('editExpire').value, bandwidth: document.getElementById('editBandwidth').value,
-              traffic_limit: document.getElementById('editTraffic').value,
+              action: 'edit', id: document.getElementById('editId').value, name: document.getElementById('editName').value,
+              agent_os: document.getElementById('editOs').value, server_group: document.getElementById('editGroup').value, 
+              price: document.getElementById('editPrice').value, expire_date: document.getElementById('editExpire').value, 
+              bandwidth: document.getElementById('editBandwidth').value, traffic_limit: document.getElementById('editTraffic').value,
               is_hidden: document.getElementById('editHidden').value
             };
             const res = await fetch('/admin/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
@@ -2050,12 +2113,8 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
       }
     }
 
-    // ==========================================
-    // 单个服务器详情 JSON API
-    // ==========================================
     if (request.method === 'GET' && url.pathname === '/api/server') {
       if (sys.is_public !== 'true' && !checkAuth(request)) return authResponse(sys.site_title);
-      
       const id = url.searchParams.get('id');
       if (!id) return new Response('Miss ID', { status: 400 });
       const server = await env.DB.prepare('SELECT * FROM servers WHERE id = ?').bind(id).first();
@@ -2083,158 +2142,32 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
         let vDate = sys.visits_date || '';
         
         vTotal++;
-        if (vDate !== todayStr) {
-            vToday = 1; 
-            vDate = todayStr;
-        } else {
-            vToday++;
-        }
+        if (vDate !== todayStr) { vToday = 1; vDate = todayStr; } else { vToday++; }
         
         sys.visits_total = vTotal.toString();
         sys.visits_today = vToday.toString();
         sys.visits_date = todayStr;
 
-        const updateVisits = async () => {
-            try {
-                await env.DB.prepare(`
-                    INSERT INTO settings (key, value) VALUES ('visits_total', ?), ('visits_today', ?), ('visits_date', ?)
-                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-                `).bind(vTotal.toString(), vToday.toString(), todayStr).run();
-            } catch(e) {}
-        };
-        ctx.waitUntil(updateVisits());
+        ctx.waitUntil(env.DB.prepare(`INSERT INTO settings (key, value) VALUES ('visits_total', ?), ('visits_today', ?), ('visits_date', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).bind(vTotal.toString(), vToday.toString(), todayStr).run().catch(()=>{}));
       }
       
       const viewId = url.searchParams.get('id');
-
       if (viewId) {
         const server = await env.DB.prepare('SELECT * FROM servers WHERE id = ?').bind(viewId).first();
         if (!server || server.is_hidden === 'true') return new Response('Server not found', { status: 404 });
-        
         const rxField = sys.auto_reset_traffic === 'true' ? 'monthly_rx' : 'net_rx';
         const txField = sys.auto_reset_traffic === 'true' ? 'monthly_tx' : 'net_tx';
-
-        const detailHtml = `<!DOCTYPE html>
-        <html>
-        <head>
-          <meta charset="UTF-8">
-          <meta name="viewport" content="width=device-width, initial-scale=1.0">
-          <title>${server.name} - ${sys.site_title}</title>
-          <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-          ${sys.custom_head || ''}
-          <style>
-            body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f9fafb; color: #333; margin: 0; padding: 20px; }
-            .container { max-width: 1200px; margin: 0 auto; }
-            .header-card { background: white; padding: 24px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
-            .title-row { display: flex; align-items: center; margin-bottom: 16px; }
-            .title-row h2 { margin: 0; font-size: 24px; margin-right: 12px; display: flex; align-items: center;}
-            .status-badge { background: #10b981; color: white; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: bold; }
-            .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; font-size: 14px; }
-            .info-item { display: flex; flex-direction: column; }
-            .info-label { color: #6b7280; font-size: 12px; margin-bottom: 4px; white-space: nowrap; }
-            .info-value { font-weight: 500; }
-            .charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; }
-            .chart-card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-            .chart-card h3 { margin-top: 0; font-size: 16px; color: #374151; display: flex; justify-content: space-between; align-items: center; }
-            .chart-val { font-size: 18px; font-weight: bold; }
-            canvas { max-height: 150px; }
-            .back-btn { display: inline-block; margin-bottom: 15px; color: #3b82f6; text-decoration: none; font-weight: 500; }
-            ${themeStyles}
-          </style>
-        </head>
-        <body class="${sys.theme || 'theme1'}">
-          <div class="container">
-            <a href="/" class="back-btn">⬅ 返回大盘</a>
-            <div class="header-card">
-              <div class="title-row">
-                <h2><span id="head-flag"></span> ${server.name}</h2>
-                <span class="status-badge" id="head-status">在线</span>
-              </div>
-              <div class="info-grid">
-                <div class="info-item"><span class="info-label">运行时间</span><span class="info-value" id="val-uptime">...</span></div>
-                <div class="info-item"><span class="info-label">架构</span><span class="info-value" id="val-arch">...</span></div>
-                <div class="info-item"><span class="info-label">系统</span><span class="info-value" id="val-os">...</span></div>
-                <div class="info-item"><span class="info-label">虚拟化</span><span class="info-value" id="val-virt">...</span></div>
-                <div class="info-item"><span class="info-label">CPU</span><span class="info-value" id="val-cpuinfo">...</span></div>
-                <div class="info-item"><span class="info-label">Load</span><span class="info-value" id="val-load">...</span></div>
-                <div class="info-item"><span class="info-label">上传 / 下载</span><span class="info-value" id="val-traffic">...</span></div>
-                <div class="info-item"><span class="info-label">启动时间</span><span class="info-value" id="val-boot">...</span></div>
-              </div>
-            </div>
-            <div class="charts-grid">
-              <div class="chart-card"><h3>CPU <span class="chart-val" id="text-cpu">0%</span></h3><canvas id="chartCPU"></canvas></div>
-              <div class="chart-card"><h3>内存 <span class="chart-val" id="text-ram">0%</span></h3><div style="font-size:12px; color:#6b7280; margin-bottom:5px;" id="text-swap">Swap: 0 / 0</div><canvas id="chartRAM"></canvas></div>
-              <div class="chart-card"><h3>磁盘 <span class="chart-val" id="text-disk">0%</span></h3><div style="width:100%; height:20px; background:#e5e7eb; border-radius:10px; overflow:hidden; margin-top:40px;"><div id="disk-bar" style="height:100%; width:0%; background:#34d399; transition:width 0.5s;"></div></div><p style="text-align:right; font-size:12px; color:#6b7280; margin-top:8px;" id="text-disk-detail">0 / 0</p></div>
-              <div class="chart-card"><h3>进程数 <span class="chart-val" id="text-proc">0</span></h3><canvas id="chartProc"></canvas></div>
-              <div class="chart-card"><h3>网络速度 <span class="chart-val" style="font-size:14px;"><span style="color:#10b981">↓</span> <span id="text-net-in">0</span> | <span style="color:#3b82f6">↑</span> <span id="text-net-out">0</span></span></h3><canvas id="chartNet"></canvas></div>
-              <div class="chart-card"><h3>TCP / UDP <span class="chart-val" style="font-size:14px;">TCP <span id="text-tcp">0</span> | UDP <span id="text-udp">0</span></span></h3><canvas id="chartConn"></canvas></div>
-              
-              <div class="chart-card chart-full">
-                <h3>国内延迟追踪 (24小时) <span class="chart-val" style="font-size:12px; font-weight:normal;">电信 <b id="t-ct">0</b> | 联通 <b id="t-cu">0</b> | 移动 <b id="t-cm">0</b> | 字节 <b id="t-bd">0</b></span></h3>
-                <canvas id="chartPing"></canvas>
-              </div>
-            </div>
-            ${getFooterHtml(sys)}
-          </div>
+        const detailHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${server.name} - ${sys.site_title}</title><script src="https://cdn.jsdelivr.net/npm/chart.js"></script>${sys.custom_head || ''}<style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f9fafb;color:#333;margin:0;padding:20px;}.container{max-width:1200px;margin:0 auto;}.header-card{background:white;padding:24px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.1);margin-bottom:20px;}.title-row{display:flex;align-items:center;margin-bottom:16px;}.title-row h2{margin:0;font-size:24px;margin-right:12px;display:flex;align-items:center;}.status-badge{background:#10b981;color:white;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:bold;}.info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;font-size:14px;}.info-item{display:flex;flex-direction:column;}.info-label{color:#6b7280;font-size:12px;margin-bottom:4px;white-space:nowrap;}.info-value{font-weight:500;}.charts-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(350px,1fr));gap:20px;}.chart-card{background:white;padding:20px;border-radius:12px;box-shadow:0 1px 3px rgba(0,0,0,0.1);}.chart-card h3{margin-top:0;font-size:16px;color:#374151;display:flex;justify-content:space-between;align-items:center;}.chart-val{font-size:18px;font-weight:bold;}canvas{max-height:150px;}.back-btn{display:inline-block;margin-bottom:15px;color:#3b82f6;text-decoration:none;font-weight:500;}${themeStyles}</style></head><body class="${sys.theme || 'theme1'}"><div class="container"><a href="/" class="back-btn">⬅ 返回大盘</a><div class="header-card"><div class="title-row"><h2><span id="head-flag"></span> ${server.name}</h2><span class="status-badge" id="head-status">在线</span></div><div class="info-grid"><div class="info-item"><span class="info-label">运行时间</span><span class="info-value" id="val-uptime">...</span></div><div class="info-item"><span class="info-label">架构</span><span class="info-value" id="val-arch">...</span></div><div class="info-item"><span class="info-label">系统</span><span class="info-value" id="val-os">...</span></div><div class="info-item"><span class="info-label">虚拟化</span><span class="info-value" id="val-virt">...</span></div><div class="info-item"><span class="info-label">CPU</span><span class="info-value" id="val-cpuinfo">...</span></div><div class="info-item"><span class="info-label">Load</span><span class="info-value" id="val-load">...</span></div><div class="info-item"><span class="info-label">上传 / 下载</span><span class="info-value" id="val-traffic">...</span></div><div class="info-item"><span class="info-label">启动时间</span><span class="info-value" id="val-boot">...</span></div></div></div><div class="charts-grid"><div class="chart-card"><h3>CPU <span class="chart-val" id="text-cpu">0%</span></h3><canvas id="chartCPU"></canvas></div><div class="chart-card"><h3>内存 <span class="chart-val" id="text-ram">0%</span></h3><div style="font-size:12px; color:#6b7280; margin-bottom:5px;" id="text-swap">Swap: 0 / 0</div><canvas id="chartRAM"></canvas></div><div class="chart-card"><h3>磁盘 <span class="chart-val" id="text-disk">0%</span></h3><div style="width:100%; height:20px; background:#e5e7eb; border-radius:10px; overflow:hidden; margin-top:40px;"><div id="disk-bar" style="height:100%; width:0%; background:#34d399; transition:width 0.5s;"></div></div><p style="text-align:right; font-size:12px; color:#6b7280; margin-top:8px;" id="text-disk-detail">0 / 0</p></div><div class="chart-card"><h3>进程数 <span class="chart-val" id="text-proc">0</span></h3><canvas id="chartProc"></canvas></div><div class="chart-card"><h3>网络速度 <span class="chart-val" style="font-size:14px;"><span style="color:#10b981">↓</span> <span id="text-net-in">0</span> | <span style="color:#3b82f6">↑</span> <span id="text-net-out">0</span></span></h3><canvas id="chartNet"></canvas></div><div class="chart-card"><h3>TCP / UDP <span class="chart-val" style="font-size:14px;">TCP <span id="text-tcp">0</span> | UDP <span id="text-udp">0</span></span></h3><canvas id="chartConn"></canvas></div><div class="chart-card chart-full"><h3>国内延迟追踪 (24小时) <span class="chart-val" style="font-size:12px; font-weight:normal;">电信 <b id="t-ct">0</b> | 联通 <b id="t-cu">0</b> | 移动 <b id="t-cm">0</b> | 字节 <b id="t-bd">0</b></span></h3><canvas id="chartPing"></canvas></div></div>${getFooterHtml(sys)}</div>
           <script>
             const serverId = "${viewId}";
             const formatBytes = (bytes) => { const b = parseInt(bytes); if (isNaN(b) || b === 0) return '0 B'; const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB', 'TB']; const i = Math.floor(Math.log(b) / Math.log(k)); return parseFloat((b / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]; };
-            
-            const commonOptions = { 
-              responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, 
-              scales: { x: { display: false }, y: { beginAtZero: true, border: { display: false } } }, 
-              plugins: { legend: { display: false }, tooltip: { enabled: false } }, 
-              elements: { point: { radius: 0 }, line: { tension: 0.4, borderWidth: 2 } } 
-            };
-            
-            const createChart = (ctxId, color, bgColor) => { 
-                const ctx = document.getElementById(ctxId).getContext('2d'); 
-                return new Chart(ctx, { 
-                    type: 'line', 
-                    data: { labels: [], datasets: [{ data: [], borderColor: color, backgroundColor: bgColor, fill: true }] }, 
-                    options: commonOptions 
-                }); 
-            };
-            
-            const charts = { 
-                cpu: createChart('chartCPU', '#3b82f6', 'rgba(59, 130, 246, 0.1)'), 
-                ram: createChart('chartRAM', '#8b5cf6', 'rgba(139, 92, 246, 0.1)'), 
-                proc: createChart('chartProc', '#ec4899', 'rgba(236, 72, 153, 0.1)') 
-            };
-            
-            charts.net = new Chart(document.getElementById('chartNet').getContext('2d'), { 
-                type: 'line', 
-                data: { labels: [], datasets: [ 
-                    { label: 'In', data: [], borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0 }, 
-                    { label: 'Out', data: [], borderColor: '#3b82f6', borderWidth: 2, tension: 0.4, pointRadius: 0 } 
-                ]}, options: commonOptions 
-            });
-            
-            charts.conn = new Chart(document.getElementById('chartConn').getContext('2d'), { 
-                type: 'line', 
-                data: { labels: [], datasets: [ 
-                    { label: 'TCP', data: [], borderColor: '#6366f1', borderWidth: 2, tension: 0.4, pointRadius: 0 }, 
-                    { label: 'UDP', data: [], borderColor: '#d946ef', borderWidth: 2, tension: 0.4, pointRadius: 0 } 
-                ]}, options: commonOptions 
-            });
-            
-            const pingOptions = { 
-                responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, 
-                scales: { x: { display: true, ticks: { maxTicksLimit: 15, color: '#9ca3af', font: { size: 10 } } }, y: { beginAtZero: true, border: { display: false } } }, 
-                plugins: { legend: { display: true, position: 'top', labels: { boxWidth: 12, font: { size: 11 } } }, tooltip: { enabled: true, mode: 'index', intersect: false } }, 
-                elements: { point: { radius: 0, hitRadius: 10, hoverRadius: 4 }, line: { tension: 0.3, borderWidth: 2 } } 
-            };
-            
-            charts.ping = new Chart(document.getElementById('chartPing').getContext('2d'), { 
-                type: 'line', 
-                data: { labels: [], datasets: [ 
-                    { label: '电信', data: [], borderColor: '#10b981', backgroundColor: 'transparent' }, 
-                    { label: '联通', data: [], borderColor: '#f59e0b', backgroundColor: 'transparent' }, 
-                    { label: '移动', data: [], borderColor: '#3b82f6', backgroundColor: 'transparent' }, 
-                    { label: '字节', data: [], borderColor: '#8b5cf6', backgroundColor: 'transparent' } 
-                ] }, 
-                options: pingOptions 
-            });
+            const commonOptions = { responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, scales: { x: { display: false }, y: { beginAtZero: true, border: { display: false } } }, plugins: { legend: { display: false }, tooltip: { enabled: false } }, elements: { point: { radius: 0 }, line: { tension: 0.4, borderWidth: 2 } } };
+            const createChart = (ctxId, color, bgColor) => { const ctx = document.getElementById(ctxId).getContext('2d'); return new Chart(ctx, { type: 'line', data: { labels: [], datasets: [{ data: [], borderColor: color, backgroundColor: bgColor, fill: true }] }, options: commonOptions }); };
+            const charts = { cpu: createChart('chartCPU', '#3b82f6', 'rgba(59, 130, 246, 0.1)'), ram: createChart('chartRAM', '#8b5cf6', 'rgba(139, 92, 246, 0.1)'), proc: createChart('chartProc', '#ec4899', 'rgba(236, 72, 153, 0.1)') };
+            charts.net = new Chart(document.getElementById('chartNet').getContext('2d'), { type: 'line', data: { labels: [], datasets: [ { label: 'In', data: [], borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'Out', data: [], borderColor: '#3b82f6', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
+            charts.conn = new Chart(document.getElementById('chartConn').getContext('2d'), { type: 'line', data: { labels: [], datasets: [ { label: 'TCP', data: [], borderColor: '#6366f1', borderWidth: 2, tension: 0.4, pointRadius: 0 }, { label: 'UDP', data: [], borderColor: '#d946ef', borderWidth: 2, tension: 0.4, pointRadius: 0 } ]}, options: commonOptions });
+            const pingOptions = { responsive: true, maintainAspectRatio: false, animation: { duration: 0 }, scales: { x: { display: true, ticks: { maxTicksLimit: 15, color: '#9ca3af', font: { size: 10 } } }, y: { beginAtZero: true, border: { display: false } } }, plugins: { legend: { display: true, position: 'top', labels: { boxWidth: 12, font: { size: 11 } } }, tooltip: { enabled: true, mode: 'index', intersect: false } }, elements: { point: { radius: 0, hitRadius: 10, hoverRadius: 4 }, line: { tension: 0.3, borderWidth: 2 } } };
+            charts.ping = new Chart(document.getElementById('chartPing').getContext('2d'), { type: 'line', data: { labels: [], datasets: [ { label: '电信', data: [], borderColor: '#10b981', backgroundColor: 'transparent' }, { label: '联通', data: [], borderColor: '#f59e0b', backgroundColor: 'transparent' }, { label: '移动', data: [], borderColor: '#3b82f6', backgroundColor: 'transparent' }, { label: '字节', data: [], borderColor: '#8b5cf6', backgroundColor: 'transparent' } ] }, options: pingOptions });
 
             async function fetchData() {
               try {
@@ -2260,25 +2193,9 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
                     const nowTime = new Date(); 
                     const timeLabel = nowTime.getHours().toString().padStart(2, '0') + ':' + String(nowTime.getMinutes()).padStart(2, '0');
                     const rtLabels = [...hist.time, timeLabel];
-
-                    const updateChartSync = (chart, histArray, rtValue) => {
-                        chart.data.labels = rtLabels;
-                        chart.data.datasets[0].data = histArray ? [...histArray, rtValue] : [];
-                        chart.update('none');
-                    };
-
-                    const updateMultiChartSync = (chart, histArrays, rtValues) => {
-                        chart.data.labels = rtLabels;
-                        histArrays.forEach((hArr, i) => {
-                            chart.data.datasets[i].data = hArr ? [...hArr, rtValues[i]] : [];
-                        });
-                        chart.update('none');
-                    };
-
-                    updateChartSync(charts.cpu, hist.cpu, parseFloat(data.cpu) || 0);
-                    updateChartSync(charts.ram, hist.ram, parseFloat(data.ram) || 0);
-                    updateChartSync(charts.proc, hist.proc, parseInt(data.processes) || 0);
-
+                    const updateChartSync = (chart, histArray, rtValue) => { chart.data.labels = rtLabels; chart.data.datasets[0].data = histArray ? [...histArray, rtValue] : []; chart.update('none'); };
+                    const updateMultiChartSync = (chart, histArrays, rtValues) => { chart.data.labels = rtLabels; histArrays.forEach((hArr, i) => { chart.data.datasets[i].data = hArr ? [...hArr, rtValues[i]] : []; }); chart.update('none'); };
+                    updateChartSync(charts.cpu, hist.cpu, parseFloat(data.cpu) || 0); updateChartSync(charts.ram, hist.ram, parseFloat(data.ram) || 0); updateChartSync(charts.proc, hist.proc, parseInt(data.processes) || 0);
                     updateMultiChartSync(charts.net, [hist.net_in, hist.net_out], [parseFloat(data.net_in_speed) || 0, parseFloat(data.net_out_speed) || 0]);
                     updateMultiChartSync(charts.conn, [hist.tcp, hist.udp], [parseInt(data.tcp_conn) || 0, parseInt(data.udp_conn) || 0]);
                     updateMultiChartSync(charts.ping, [hist.ping_ct, hist.ping_cu, hist.ping_cm, hist.ping_bd], [parseInt(data.ping_ct) || 0, parseInt(data.ping_cu) || 0, parseInt(data.ping_cm) || 0, parseInt(data.ping_bd) || 0]);
@@ -2286,10 +2203,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
               } catch (e) {}
             }
             setInterval(fetchData, 3000); fetchData();
-          </script>
-          ${sys.custom_script || ''}
-        </body>
-        </html>`;
+          </script>${sys.custom_script || ''}</body></html>`;
         return new Response(detailHtml, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
       }
 
@@ -2457,76 +2371,33 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
             const diskUsedStr = formatBytes((parseFloat(server.disk_used || 0) * 1048576).toString());
             const diskTotalStr = formatBytes((parseFloat(server.disk_total || 0) * 1048576).toString());
 
-            // 【还原】恢复原版的 vps-card HTML 和 CSS 布局，带有绿灯点
             cardContentHtml += `
               <a href="/?id=${server.id}" class="vps-card" data-country="${cCode}">
                 <div class="card-left">
-                  <div class="card-title">
-                    <div class="status-dot" style="background:${statusColor};"></div>
-                    ${flagHtml} <span style="font-size:15px;" class="card-title-text">${server.name}</span>
-                  </div>
+                  <div class="card-title"><div class="status-dot" style="background:${statusColor};"></div>${flagHtml} <span style="font-size:15px;" class="card-title-text">${server.name}</span></div>
                   ${metaHtml}
                   <div class="card-badges">${badgesHtml}</div>
                   ${pingHtml}
                 </div>
-                
                 <div class="card-right">
-                  <div class="stat-group">
-                    <div class="stat-header"><span>CPU</span><span style="color: ${cpu > 80 ? '#ef4444' : 'inherit'};">${cpu}%</span></div>
-                    <div class="stat-bar-full"><div style="width:${cpu}%; background: ${cpu > 80 ? '#ef4444' : '#3b82f6'};"></div></div>
-                    <div class="stat-subtext" title="${server.cpu_info || '-'}">${server.cpu_info || '-'}</div>
-                  </div>
-                  
-                  <div class="stat-group">
-                    <div class="stat-header"><span>内存</span><span style="color: ${ram > 80 ? '#ef4444' : 'inherit'};">${ram}%</span></div>
-                    <div class="stat-bar-full"><div style="width:${ram}%; background: ${ram > 80 ? '#ef4444' : '#10b981'};"></div></div>
-                    <div class="stat-subtext">${ramUsedStr} / ${ramTotalStr}</div>
-                  </div>
-
-                  <div class="stat-group">
-                    <div class="stat-header"><span>存储</span><span style="color: ${disk > 80 ? '#ef4444' : 'inherit'};">${disk}%</span></div>
-                    <div class="stat-bar-full"><div style="width:${disk}%; background: ${disk > 80 ? '#ef4444' : '#10b981'};"></div></div>
-                    <div class="stat-subtext">${diskUsedStr} / ${diskTotalStr}</div>
-                  </div>
-                  
-                  <div style="display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-top: 2px;">
-                    <div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 5px;" title="${server.os || '-'} | ${server.arch || '-'} | ${server.virt || '-'}">${server.os || '-'} | ${server.arch || '-'} | ${server.virt || '-'}</div>
-                    <div style="white-space: nowrap; flex-shrink: 0;">TCP/UDP: ${server.tcp_conn || '0'} / ${server.udp_conn || '0'}</div>
-                  </div>
-                  
-                  <div style="display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-top: 4px; white-space: nowrap; gap: 8px;">
-                    <div style="overflow: hidden; text-overflow: ellipsis;"><span style="color:#10b981">↓</span> ${netInSpeed}/s</div>
-                    <div style="overflow: hidden; text-overflow: ellipsis;"><span style="color:#3b82f6">↑</span> ${netOutSpeed}/s</div>
-                  </div>
+                  <div class="stat-group"><div class="stat-header"><span>CPU</span><span style="color: ${cpu > 80 ? '#ef4444' : 'inherit'};">${cpu}%</span></div><div class="stat-bar-full"><div style="width:${cpu}%; background: ${cpu > 80 ? '#ef4444' : '#3b82f6'};"></div></div><div class="stat-subtext" title="${server.cpu_info || '-'}">${server.cpu_info || '-'}</div></div>
+                  <div class="stat-group"><div class="stat-header"><span>内存</span><span style="color: ${ram > 80 ? '#ef4444' : 'inherit'};">${ram}%</span></div><div class="stat-bar-full"><div style="width:${ram}%; background: ${ram > 80 ? '#ef4444' : '#10b981'};"></div></div><div class="stat-subtext">${ramUsedStr} / ${ramTotalStr}</div></div>
+                  <div class="stat-group"><div class="stat-header"><span>存储</span><span style="color: ${disk > 80 ? '#ef4444' : 'inherit'};">${disk}%</span></div><div class="stat-bar-full"><div style="width:${disk}%; background: ${disk > 80 ? '#ef4444' : '#10b981'};"></div></div><div class="stat-subtext">${diskUsedStr} / ${diskTotalStr}</div></div>
+                  <div style="display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-top: 2px;"><div style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 5px;" title="${server.os || '-'} | ${server.arch || '-'} | ${server.virt || '-'}">${server.os || '-'} | ${server.arch || '-'} | ${server.virt || '-'}</div><div style="white-space: nowrap; flex-shrink: 0;">TCP/UDP: ${server.tcp_conn || '0'} / ${server.udp_conn || '0'}</div></div>
+                  <div style="display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-top: 4px; white-space: nowrap; gap: 8px;"><div style="overflow: hidden; text-overflow: ellipsis;"><span style="color:#10b981">↓</span> ${netInSpeed}/s</div><div style="overflow: hidden; text-overflow: ellipsis;"><span style="color:#3b82f6">↑</span> ${netOutSpeed}/s</div></div>
                 </div>
               </a>
             `;
 
-            // 【还原】恢复原版的 table-row 绿灯点
             tableBodyHtml += `
               <tr onclick="window.location.href='/?id=${server.id}'" style="cursor:pointer;" data-country="${cCode}">
                 <td style="text-align:center;"><div class="status-dot" style="background:${statusColor}; display:inline-block; margin:0;"></div></td>
                 <td><b>${server.name}</b></td>
                 <td>${flagHtml}</td>
                 <td><span class="os-text">${server.os || '-'} / ${server.arch || '-'} / ${server.virt || '-'}</span></td>
-                <td style="min-width:100px;">
-                  <div style="display:flex; align-items:center; gap:8px;">
-                    <div class="stat-bar" style="width:50px; margin:0;"><div style="width:${cpu}%; background:#3b82f6;"></div></div>
-                    <span>${cpu}%</span>
-                  </div>
-                </td>
-                <td style="min-width:100px;">
-                  <div style="display:flex; align-items:center; gap:8px;">
-                    <div class="stat-bar" style="width:50px; margin:0;"><div style="width:${ram}%; background:#10b981;"></div></div>
-                    <span>${ram}%</span>
-                  </div>
-                </td>
-                <td style="min-width:100px;">
-                  <div style="display:flex; align-items:center; gap:8px;">
-                    <div class="stat-bar" style="width:50px; margin:0;"><div style="width:${disk}%; background:#10b981;"></div></div>
-                    <span>${disk}%</span>
-                  </div>
-                </td>
+                <td style="min-width:100px;"><div style="display:flex; align-items:center; gap:8px;"><div class="stat-bar" style="width:50px; margin:0;"><div style="width:${cpu}%; background:#3b82f6;"></div></div><span>${cpu}%</span></div></td>
+                <td style="min-width:100px;"><div style="display:flex; align-items:center; gap:8px;"><div class="stat-bar" style="width:50px; margin:0;"><div style="width:${ram}%; background:#10b981;"></div></div><span>${ram}%</span></div></td>
+                <td style="min-width:100px;"><div style="display:flex; align-items:center; gap:8px;"><div class="stat-bar" style="width:50px; margin:0;"><div style="width:${disk}%; background:#10b981;"></div></div><span>${disk}%</span></div></td>
                 <td style="color:#64748b; font-size:12px; white-space: nowrap;">${rx_val_str} | ${tx_val_str}</td>
                 <td style="white-space: nowrap;">${netInSpeed}/s</td>
                 <td style="white-space: nowrap;">${netOutSpeed}/s</td>
@@ -2538,22 +2409,36 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
         }
       }
 
+      // 获取前 10 财富榜
+      let richListRows = '';
+      try {
+          const { results: rList } = await env.DB.prepare('SELECT address, balance FROM blockchain_wallets ORDER BY balance DESC LIMIT 10').all();
+          rList.forEach((r, idx) => {
+              const shortAddr = r.address.length > 15 ? r.address.substring(0,8) + '...' + r.address.slice(-6) : r.address;
+              richListRows += `<tr><td><span style="color:#888; margin-right:8px;">#${idx+1}</span> <a href="javascript:void(0)" onclick="searchBalance('${r.address}')" style="color:#3b82f6; text-decoration:none; font-family:monospace; font-weight:bold;">${shortAddr}</a></td><td style="text-align:right; font-weight:bold; color:#10b981;">${r.balance.toFixed(2)} Cycle</td></tr>`;
+          });
+      } catch(e) {}
+      if(!richListRows) richListRows = '<tr><td colspan="2" style="text-align:center;">暂无榜单数据</td></tr>';
+
+      // 渲染最新区块列表 (带可追踪的 Txs)
       let blockExplorerRows = '';
       try {
           const { results: recentBlocks } = await env.DB.prepare('SELECT * FROM blockchain_ledger ORDER BY slot_id DESC LIMIT 50').all();
           for (const b of recentBlocks) {
               const bDate = new Date(b.timestamp + 8*3600000).toISOString().replace('T',' ').substring(0, 19);
-              const proposerLink = b.proposer_domain.startsWith('http') ? b.proposer_domain : 'https://' + b.proposer_domain;
+              const cleanProposer = b.proposer_domain.replace('https://', '').replace('http://', '');
+              
               let txsHtml = `<span style="color:#94a3b8;">0 Txs</span>`;
               try {
                   const bPayload = JSON.parse(b.payload);
                   if (bPayload.txs && bPayload.txs.length > 0) {
-                      txsHtml = `<span style="color:#8b5cf6; font-weight:bold;">${bPayload.txs.length} Txs</span>`;
+                      const safeTxs = JSON.stringify(bPayload.txs).replace(/'/g, "&#39;").replace(/"/g, "&quot;");
+                      txsHtml = `<a href="javascript:void(0)" onclick="showBlockTxs('${safeTxs}')" style="color:#8b5cf6; font-weight:bold; text-decoration:underline;">${bPayload.txs.length} Txs</a>`;
                   }
               } catch(e) {}
               blockExplorerRows += `<tr>
                   <td><b style="color:#10b981;"># ${b.slot_id}</b></td>
-                  <td><a href="${proposerLink}" target="_blank" style="color:#3b82f6; text-decoration:none; font-weight:600;">${b.proposer_domain.replace('https://', '')}</a></td>
+                  <td><span style="color:#3b82f6; font-weight:600;">${cleanProposer}</span></td>
                   <td style="font-family:monospace; font-size:11px; color:#8b949e;">${b.block_hash}</td>
                   <td>${txsHtml}</td>
                   <td style="color:#64748b; font-size:12px;">${bDate}</td>
@@ -2575,6 +2460,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
              <div id="ajax-cards">${cardContentHtml}</div>
              <tbody id="ajax-table" style="display:none;">${tableBodyHtml || '<tr><td colspan="11" style="text-align:center;">暂无数据</td></tr>'}</tbody>
              <tbody id="ajax-blocks" style="display:none;">${blockExplorerRows}</tbody>
+             <tbody id="ajax-richlist" style="display:none;">${richListRows}</tbody>
              <script id="map-data" type="application/json">${JSON.stringify(countryStats)}</script>
           `;
           return new Response(ajaxResponse, { headers: { 'Content-Type': 'text/html' } });
@@ -2608,19 +2494,6 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
           .theme4 .ticker-bar { background: rgba(0,0,0,0.2); }
           .theme4 .ticker-fill { background: #00f2fe; }
 
-          /* 【还原】原版卡片布局 CSS */
-          .grid-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 15px; }
-          .vps-card { display: flex; justify-content: space-between; align-items: stretch; background: white; padding: 18px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); text-decoration: none; color: inherit; border: 1px solid transparent; transition: all 0.2s ease; }
-          .card-left { flex: 0 0 180px; display: flex; flex-direction: column; justify-content: center; }
-          .card-title { display: flex; align-items: center; margin-bottom: 4px; }
-          .card-title-text { font-weight: 600; }
-          .status-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; flex-shrink:0; }
-          .card-meta { font-size: 12px; color: #6b7280; margin-bottom: 3px; }
-          .card-badges { margin-top: 10px; display: flex; gap: 5px; flex-wrap: wrap; }
-          .badge { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; color: white; }
-          .badge-bw { background: #3b82f6; } .badge-tf { background: #10b981; } .badge-v4 { background: #a855f7; } .badge-v6 { background: #ec4899; }
-          .card-right { flex: 1; display: flex; flex-direction: column; justify-content: center; padding-left: 15px; border-left: 1px solid rgba(150,150,150,0.1); min-width: 0; }
-          
           body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f5f7; color: #333; margin: 0; padding: 20px; }
           .container { max-width: 1200px; margin: 0 auto; }
           .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
@@ -2630,6 +2503,33 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
           .g-val { font-size: 22px; font-weight: bold; color: #111; margin: 8px 0; line-height: 1.2; word-break: break-word; white-space: normal; }
           .g-label { font-size: 13px; color: #666; white-space: normal; line-height: 1.4; }
           @media (max-width: 800px) { .grid-container { grid-template-columns: 1fr; } .vps-card { flex-direction: column; } .card-right { padding-left: 0; border-left: none; border-top: 1px solid #f0f0f0; margin-top: 15px; padding-top: 15px; } .header { flex-direction: column; align-items: flex-start; gap: 15px;} .header-right { width:100%; justify-content: space-between;} }
+
+          /* Asset Radar & Rich List Styles */
+          .asset-radar { display: flex; gap: 10px; margin-bottom: 20px; align-items: center; flex-wrap: wrap; background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+          .asset-radar input { flex: 1; min-width: 250px; padding: 10px 15px; border: 1px solid #e2e8f0; border-radius: 8px; font-family: monospace; font-size: 14px; }
+          .asset-radar button { background: #8b5cf6; color: white; border: none; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-weight: bold; transition: opacity 0.2s; }
+          .asset-radar button:hover { opacity: 0.9; }
+          .block-dashboard-layout { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; align-items: start; }
+          .rich-list-card { background: white; border-radius: 12px; padding: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); overflow-x: auto;}
+          .rich-list-card h3 { margin-top: 0; font-size: 16px; color: #1f2937; border-bottom: 1px solid #f1f5f9; padding-bottom: 10px; margin-bottom: 10px; }
+          
+          .theme2 .asset-radar, .theme2 .rich-list-card { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; box-shadow: none; }
+          .theme2 .asset-radar input { background: #0d1117; color: #c9d1d9; border-color: #30363d; }
+          .theme2 .rich-list-card h3 { color: #fff; border-bottom-color: #30363d; }
+          .theme4 .asset-radar, .theme4 .rich-list-card { background: rgba(255,255,255,0.2); backdrop-filter: blur(16px); border: 1px solid rgba(255,255,255,0.4); color:#fff; }
+          .theme4 .asset-radar input { background: rgba(0,0,0,0.2); color:#fff; border:none; }
+          .theme4 .rich-list-card h3 { color:#fff; border-bottom-color: rgba(255,255,255,0.2); }
+          .theme5 .asset-radar, .theme5 .rich-list-card { background: #0b0c10; border: 1px solid #f0f; border-radius: 0; color: #0ff; }
+          .theme5 .asset-radar input { background: #000; color: #0ff; border-color: #f0f; }
+
+          @media (max-width: 900px) { .block-dashboard-layout { grid-template-columns: 1fr; } }
+          
+          /* Modal for Txs */
+          .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 100; overflow-y: auto; }
+          .modal-content { background: white; padding: 20px; border-radius: 12px; width: 600px; max-width: 95%; margin: 40px auto; position: relative; max-height: 85vh; overflow-y: auto; box-sizing: border-box; }
+          .theme2 .modal-content { background: #161b22; color: #c9d1d9; border: 1px solid #30363d;}
+          .theme4 .modal-content { background: rgba(0,0,0,0.8); color: #fff; border: 1px solid rgba(255,255,255,0.4); backdrop-filter: blur(16px);}
+          .theme5 .modal-content { background: #0b0c10; color: #0ff; border: 1px solid #f0f; border-radius:0;}
         </style>
       </head>
       <body class="${sys.theme || 'theme1'}">
@@ -2637,21 +2537,12 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
           
           <div class="header" style="flex-wrap: wrap; gap: 15px;">
             <h1 style="margin:0;">${sys.site_title}</h1>
-            
             <div style="display: flex; align-items: center; gap: 15px; flex-wrap: wrap;">
               <div class="view-controls">
-                <button class="toggle-btn active" id="btn-card" onclick="switchView('card')">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg> 卡片
-                </button>
-                <button class="toggle-btn" id="btn-table" onclick="switchView('table')">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg> 表格
-                </button>
-                <button class="toggle-btn" id="btn-map" onclick="switchView('map')">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"></polygon><line x1="9" y1="3" x2="9" y2="21"></line><line x1="15" y1="3" x2="15" y2="21"></line></svg> 地图
-                </button>
-                <button class="toggle-btn" id="btn-block" onclick="switchView('block')">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg> 链上区块
-                </button>
+                <button class="toggle-btn active" id="btn-card" onclick="switchView('card')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg> 卡片</button>
+                <button class="toggle-btn" id="btn-table" onclick="switchView('table')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg> 表格</button>
+                <button class="toggle-btn" id="btn-map" onclick="switchView('map')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21"></polygon><line x1="9" y1="3" x2="9" y2="21"></line><line x1="15" y1="3" x2="15" y2="21"></line></svg> 地图</button>
+                <button class="toggle-btn" id="btn-block" onclick="switchView('block')"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg> 链上区块</button>
               </div>
               <a href="/admin" class="admin-btn">${sys.admin_title}</a>
             </div>
@@ -2691,12 +2582,8 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
           <div id="view-table" class="view-panel">
             <div class="table-responsive">
               <table class="custom-table">
-                <thead>
-                  <tr><th>状态</th><th>节点名称</th><th>地区</th><th>系统/架构/虚拟化</th><th>CPU</th><th>内存</th><th>磁盘</th><th>流量(入|出)</th><th>下行</th><th>上行</th><th>更新</th></tr>
-                </thead>
-                <tbody id="ajax-table">
-                  ${tableBodyHtml || '<tr><td colspan="11" style="text-align:center;">暂无数据</td></tr>'}
-                </tbody>
+                <thead><tr><th>状态</th><th>节点名称</th><th>地区</th><th>系统/架构/虚拟化</th><th>CPU</th><th>内存</th><th>磁盘</th><th>流量(入|出)</th><th>下行</th><th>上行</th><th>更新</th></tr></thead>
+                <tbody id="ajax-table">${tableBodyHtml || '<tr><td colspan="11" style="text-align:center;">暂无数据</td></tr>'}</tbody>
               </table>
             </div>
           </div>
@@ -2706,19 +2593,40 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
           </div>
 
           <div id="view-block" class="view-panel">
-            <div class="table-responsive" style="background:white; border-radius:12px; padding:10px; box-shadow:0 2px 8px rgba(0,0,0,0.04);">
-              <table class="custom-table">
-                <thead>
-                  <tr><th>区块高度 (Slot)</th><th>出块见证人 (Proposer)</th><th>区块哈希 (Hash)</th><th>打包交易数</th><th>见证时间 (UTC+8)</th></tr>
-                </thead>
-                <tbody id="table-blocks-body">
-                  ${blockExplorerRows}
-                </tbody>
-              </table>
+            <div class="asset-radar">
+                <input type="text" id="radar-input" placeholder="输入 EVM 钱包地址 (0x...) 查询本链 Cycle 余额">
+                <button onclick="executeSearch()">🔍 查询资产</button>
+            </div>
+            <div id="ui-balance-result" style="display:none; padding:15px; margin-bottom:20px; background:rgba(16,185,129,0.1); border:1px solid rgba(16,185,129,0.3); border-radius:8px; font-size:16px;"></div>
+
+            <div class="block-dashboard-layout">
+                <div class="table-responsive" style="background:white; border-radius:12px; padding:10px; box-shadow:0 2px 8px rgba(0,0,0,0.04);">
+                  <table class="custom-table">
+                    <thead><tr><th>区块高度 (Slot)</th><th>出块见证人</th><th>区块哈希</th><th>打包交易数</th><th>见证时间 (UTC+8)</th></tr></thead>
+                    <tbody id="table-blocks-body">${blockExplorerRows}</tbody>
+                  </table>
+                </div>
+
+                <div class="rich-list-card">
+                    <h3>🏆 Cycle 财富英雄榜</h3>
+                    <table class="custom-table" style="box-shadow:none;">
+                        <tbody id="ajax-richlist">${richListRows}</tbody>
+                    </table>
+                </div>
             </div>
           </div>
           
           ${getFooterHtml(sys)}
+        </div>
+
+        <div id="txTraceModal" class="modal">
+            <div class="modal-content">
+                <h3 style="margin-top:0; color:#8b5cf6;">🔗 区块交易流水追踪</h3>
+                <div id="txTraceList" style="max-height:400px; overflow-y:auto; margin-bottom:15px;"></div>
+                <div style="text-align:right;">
+                    <button onclick="document.getElementById('txTraceModal').style.display='none'" style="padding:8px 15px; border:1px solid #ccc; background:transparent; cursor:pointer; border-radius:6px; color:inherit;">关闭</button>
+                </div>
+            </div>
         </div>
 
         <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
@@ -2747,44 +2655,23 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
             localStorage.setItem('monitor_preferred_view', viewName);
 
             if (viewName === 'map') {
-              if (!mapInitialized) {
-                initMap();
-                mapInitialized = true;
-              } else {
-                window.myMap.invalidateSize(); 
-              }
+              if (!mapInitialized) { initMap(); mapInitialized = true; } else { window.myMap.invalidateSize(); }
             }
           }
 
-          function setFilter(code) {
-              window.currentFilter = code;
-              applyFilter();
-          }
+          function setFilter(code) { window.currentFilter = code; applyFilter(); }
 
           function applyFilter() {
               if(!window.currentFilter) window.currentFilter = 'all';
-              
               document.querySelectorAll('.filter-tag').forEach(el => {
-                  if (el.dataset.code === window.currentFilter) el.classList.add('active');
-                  else el.classList.remove('active');
+                  if (el.dataset.code === window.currentFilter) el.classList.add('active'); else el.classList.remove('active');
               });
-              
               document.querySelectorAll('.vps-card').forEach(el => {
-                  if (window.currentFilter === 'all' || el.dataset.country === window.currentFilter) {
-                      el.style.display = 'flex';
-                  } else {
-                      el.style.display = 'none';
-                  }
+                  el.style.display = (window.currentFilter === 'all' || el.dataset.country === window.currentFilter) ? 'flex' : 'none';
               });
-              
               document.querySelectorAll('#ajax-table tr').forEach(el => {
-                  if (window.currentFilter === 'all' || el.dataset.country === window.currentFilter) {
-                      el.style.display = '';
-                  } else {
-                      el.style.display = 'none';
-                  }
+                  el.style.display = (window.currentFilter === 'all' || el.dataset.country === window.currentFilter) ? '' : 'none';
               });
-
               document.querySelectorAll('.group-header').forEach(header => {
                   const grid = header.nextElementSibling;
                   if (grid && grid.classList.contains('grid-container')) {
@@ -2794,84 +2681,85 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
               });
           }
 
+          /* --- Web3 Asset Radar & Txs JS --- */
+          function searchBalance(addr) {
+              document.getElementById('radar-input').value = addr;
+              document.getElementById('txTraceModal').style.display = 'none';
+              executeSearch();
+              window.scrollTo({top: document.getElementById('view-block').offsetTop - 20, behavior: 'smooth'});
+          }
+          
+          async function executeSearch() {
+              const addr = document.getElementById('radar-input').value.trim();
+              if(!addr) return;
+              const resDiv = document.getElementById('ui-balance-result');
+              resDiv.style.display = 'block';
+              resDiv.innerHTML = \`<span style="color:#888;">正在检索本地账本节点...</span>\`;
+              try {
+                  const res = await fetch('/?action=balance&address=' + addr);
+                  const data = await res.json();
+                  resDiv.innerHTML = \`账户地址 <a href="javascript:void(0)" style="color:#8b5cf6; font-family:monospace; font-weight:bold;">\${addr}</a> 当前持有资产：<b style="color:#10b981; font-size:20px;">\${data.balance} Cycle</b>\`;
+              } catch(e) {
+                  resDiv.innerHTML = \`<span style="color:#ef4444;">查询失败或地址无记录</span>\`;
+              }
+          }
+
+          function showBlockTxs(txsStr) {
+              const txs = JSON.parse(txsStr);
+              const isDark = document.body.className.includes('theme2') || document.body.className.includes('theme5') || document.body.className.includes('theme4');
+              const bg1 = isDark ? 'rgba(16,185,129,0.1)' : '#f0fdf4';
+              const bg2 = isDark ? 'rgba(255,255,255,0.05)' : '#f8fafc';
+              
+              let html = '<ul style="list-style:none; padding:0; margin:0; font-family:monospace; font-size:13px;">';
+              txs.forEach(tx => {
+                  if(tx.type === 'COINBASE') {
+                      html += \`<li style="margin-bottom:10px; padding:12px; background:\${bg1}; border-radius:8px; display:flex; flex-direction:column; gap:5px;">
+                          <div>⛏️ <b style="color:#10b981;">出块挖矿奖励</b> &rarr; <a href="javascript:void(0)" onclick="searchBalance('\${tx.to}')" style="color:#3b82f6; text-decoration:none;">\${tx.to}</a></div>
+                          <div style="text-align:right; font-weight:bold; color:#10b981;">+ \${tx.amount} Cycle</div>
+                      </li>\`;
+                  } else {
+                      html += \`<li style="margin-bottom:10px; padding:12px; background:\${bg2}; border-radius:8px; display:flex; flex-direction:column; gap:5px;">
+                          <div><span style="color:#888;">From:</span> <a href="javascript:void(0)" onclick="searchBalance('\${tx.from}')" style="color:#3b82f6; text-decoration:none;">\${tx.from}</a></div>
+                          <div><span style="color:#888;">To:</span> &nbsp;&nbsp;<a href="javascript:void(0)" onclick="searchBalance('\${tx.to}')" style="color:#3b82f6; text-decoration:none;">\${tx.to}</a></div>
+                          <div style="text-align:right; font-weight:bold; color:#8b5cf6;">\${tx.amount} Cycle</div>
+                      </li>\`;
+                  }
+              });
+              html += '</ul>';
+              document.getElementById('txTraceList').innerHTML = html;
+              document.getElementById('txTraceModal').style.display = 'block';
+          }
+
           let markersLayer;
           let geoJsonLayer;
           let worldGeoJson = null;
           let currentMapDataStr = "";
 
-          const countryCoords = {
-            'US': [37.09, -95.71], 'CN': [35.86, 104.19], 'JP': [36.20, 138.25], 'HK': [22.31, 114.16],
-            'SG': [1.35, 103.81], 'KR': [35.90, 127.76], 'DE': [51.16, 10.45], 'GB': [55.37, -3.43],
-            'NL': [52.13, 5.29], 'FR': [46.22, 2.21], 'CA': [56.13, -106.34], 'AU': [-25.27, 133.77],
-            'IN': [20.59, 78.96], 'BR': [-14.23, -51.92], 'RU': [61.52, 105.31], 'ZA': [-30.55, 22.93],
-            'TW': [23.69, 120.96], 'IT': [41.87, 12.56], 'SE': [60.12, 18.64], 'CH': [46.81, 8.22],
-            'ES': [40.46, -3.74], 'PL': [51.91, 19.14], 'FI': [61.92, 25.74], 'NO': [60.47, 8.46],
-            'DK': [56.26, 9.50], 'IE': [53.14, -7.69], 'AT': [47.51, 14.55], 'TR': [38.96, 35.24],
-            'AE': [23.42, 53.84], 'MY': [4.21, 101.97], 'TH': [15.87, 100.99], 'VN': [14.05, 108.27],
-            'PH': [12.87, 121.77], 'ID': [-0.78, 113.92]
-          };
-
-          const iso2To3 = {
-            "US":"USA","CN":"CHN","JP":"JPN","HK":"HKG","SG":"SGP","KR":"KOR","DE":"DEU","GB":"GBR",
-            "NL":"NLD","FR":"FRA","CA":"CAN","AU":"AUS","IN":"IND","BR":"BRA","RU":"RUS","ZA":"ZAF",
-            "TW":"TWN","IT":"ITA","SE":"SWE","CH":"CHE","ES":"ESP","PL":"POL","FI":"FIN","NO":"NOR",
-            "DK":"DNK","IE":"IRL","AT":"AUT","TR":"TUR","AE":"ARE","MY":"MYS","TH":"THA","VN":"VNM",
-            "PH":"PHL","ID":"IDN"
-          };
+          const countryCoords = { 'US': [37.09, -95.71], 'CN': [35.86, 104.19], 'JP': [36.20, 138.25], 'HK': [22.31, 114.16], 'SG': [1.35, 103.81], 'KR': [35.90, 127.76], 'DE': [51.16, 10.45], 'GB': [55.37, -3.43], 'NL': [52.13, 5.29], 'FR': [46.22, 2.21], 'CA': [56.13, -106.34], 'AU': [-25.27, 133.77], 'IN': [20.59, 78.96], 'BR': [-14.23, -51.92], 'RU': [61.52, 105.31], 'ZA': [-30.55, 22.93], 'TW': [23.69, 120.96], 'IT': [41.87, 12.56], 'SE': [60.12, 18.64], 'CH': [46.81, 8.22], 'ES': [40.46, -3.74], 'PL': [51.91, 19.14], 'FI': [61.92, 25.74], 'NO': [60.47, 8.46], 'DK': [56.26, 9.50], 'IE': [53.14, -7.69], 'AT': [47.51, 14.55], 'TR': [38.96, 35.24], 'AE': [23.42, 53.84], 'MY': [4.21, 101.97], 'TH': [15.87, 100.99], 'VN': [14.05, 108.27], 'PH': [12.87, 121.77], 'ID': [-0.78, 113.92] };
+          const iso2To3 = { "US":"USA","CN":"CHN","JP":"JPN","HK":"HKG","SG":"SGP","KR":"KOR","DE":"DEU","GB":"GBR", "NL":"NLD","FR":"FRA","CA":"CAN","AU":"AUS","IN":"IND","BR":"BRA","RU":"RUS","ZA":"ZAF", "TW":"TWN","IT":"ITA","SE":"SWE","CH":"CHE","ES":"ESP","PL":"POL","FI":"FIN","NO":"NOR", "DK":"DNK","IE":"IRL","AT":"AUT","TR":"TUR","AE":"ARE","MY":"MYS","TH":"THA","VN":"VNM", "PH":"PHL","ID":"IDN" };
 
           async function initMap() {
-            window.myMap = L.map('map-container', {
-                zoomControl: true,
-                attributionControl: false,
-                minZoom: 1
-            }).setView([30, 10], 2);
-
+            window.myMap = L.map('map-container', { zoomControl: true, attributionControl: false, minZoom: 1 }).setView([30, 10], 2);
             try {
                 const res = await fetch('https://cdn.jsdelivr.net/gh/johan/world.geo.json@master/countries.geo.json');
                 worldGeoJson = await res.json();
                 drawMarkers();
-            } catch (e) {
-                console.error("Map load failed", e);
-            }
+            } catch (e) {}
           }
 
           function drawMarkers() {
             if(!window.myMap || !worldGeoJson) return;
-
             const newDataStr = document.getElementById('map-data').textContent;
             if (currentMapDataStr === newDataStr) return;
             currentMapDataStr = newDataStr;
-
             if(geoJsonLayer) window.myMap.removeLayer(geoJsonLayer);
-            if(markersLayer) markersLayer.clearLayers();
-            else markersLayer = L.layerGroup().addTo(window.myMap);
-
+            if(markersLayer) markersLayer.clearLayers(); else markersLayer = L.layerGroup().addTo(window.myMap);
             const data = JSON.parse(newDataStr);
             const isDark = document.body.className.includes('theme2') || document.body.className.includes('theme5');
-
-            const activeIso3 = {};
-            for (const code in data) {
-                if (iso2To3[code]) activeIso3[iso2To3[code]] = true;
-            }
-
-            geoJsonLayer = L.geoJSON(worldGeoJson, {
-                style: function(feature) {
-                    const isActive = activeIso3[feature.id];
-                    return {
-                        fillColor: isActive ? '#10b981' : (isDark ? '#2a303c' : '#d5dce2'),
-                        weight: 1,
-                        opacity: 1,
-                        color: isDark ? '#1a202c' : '#ffffff',
-                        fillOpacity: 1
-                    };
-                }
-            }).addTo(window.myMap);
-
+            const activeIso3 = {}; for (const code in data) { if (iso2To3[code]) activeIso3[iso2To3[code]] = true; }
+            geoJsonLayer = L.geoJSON(worldGeoJson, { style: function(feature) { const isActive = activeIso3[feature.id]; return { fillColor: isActive ? '#10b981' : (isDark ? '#2a303c' : '#d5dce2'), weight: 1, opacity: 1, color: isDark ? '#1a202c' : '#ffffff', fillOpacity: 1 }; } }).addTo(window.myMap);
             for (const [code, count] of Object.entries(data)) {
-              if(countryCoords[code]) {
-                const icon = L.divIcon({ className: 'custom-map-badge', html: \`<div>\${count}</div>\`, iconSize: [22,22] });
-                L.marker(countryCoords[code], {icon: icon}).addTo(markersLayer);
-              }
+              if(countryCoords[code]) { const icon = L.divIcon({ className: 'custom-map-badge', html: \`<div>\${count}</div>\`, iconSize: [22,22] }); L.marker(countryCoords[code], {icon: icon}).addTo(markersLayer); }
             }
           }
 
@@ -2901,30 +2789,19 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
                   document.getElementById('ui-pending-txs').innerText = payloadData.getAttribute('data-pending-txs');
               }
 
-              const newStats = newDoc.getElementById('ajax-stats');
-              if (newStats) document.getElementById('ajax-stats').innerHTML = newStats.innerHTML;
+              const idsToUpdate = ['ajax-stats', 'ajax-cards', 'ajax-table', 'table-blocks-body', 'ajax-filters', 'map-data', 'ajax-richlist'];
+              idsToUpdate.forEach(id => {
+                  const newEl = newDoc.getElementById(id === 'table-blocks-body' ? 'ajax-blocks' : id);
+                  if (newEl && document.getElementById(id)) {
+                      if (id === 'map-data') document.getElementById(id).textContent = newEl.textContent;
+                      else document.getElementById(id).innerHTML = newEl.innerHTML;
+                  }
+              });
               
-              const newCards = newDoc.getElementById('ajax-cards');
-              if (newCards) document.getElementById('ajax-cards').innerHTML = newCards.innerHTML;
-              
-              const newTable = newDoc.getElementById('ajax-table');
-              if (newTable) document.getElementById('ajax-table').innerHTML = newTable.innerHTML;
-
-              const newBlocks = newDoc.getElementById('ajax-blocks');
-              if (newBlocks && document.getElementById('table-blocks-body')) document.getElementById('table-blocks-body').innerHTML = newBlocks.innerHTML;
-              
-              const newFilters = newDoc.getElementById('ajax-filters');
-              if (newFilters) document.getElementById('ajax-filters').innerHTML = newFilters.innerHTML;
-              
-              const newMapData = newDoc.getElementById('map-data');
-              if (newMapData) document.getElementById('map-data').textContent = newMapData.textContent;
-              
-              drawMarkers();
-              applyFilter(); 
+              drawMarkers(); applyFilter(); 
             } catch (e) {}
           }, 3500); 
         </script>
-        
         ${sys.custom_script || ''}
       </body>
       </html>`;
