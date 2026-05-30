@@ -6,7 +6,7 @@ export default {
     // ==========================================
     // 创世时间戳与全网基石节点 (Genesis Setup)
     // ==========================================
-    const EPOCH_START = 1717113600000; 
+    const EPOCH_START = 1779667200000; 
     const SEED_NODE = 'https://tanzhen.kejikkk.com';
 
     // ==========================================
