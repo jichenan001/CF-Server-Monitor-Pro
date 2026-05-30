@@ -341,9 +341,8 @@ export default {
         }
       }
 
-      // 处理节点列表渲染数据
-      const rawNodeData = `市级节点
-陕西西安移动
+      // 处理节点列表渲染数据 (包含 IPv4 市级 与 双栈 省级)
+      const rawNodeDataV4 = `陕西西安移动
 sn-xian-cm-v4.ip.zstaticcdn.com:443
 江苏无锡移动
 js-wuxi-cm-v4.ip.zstaticcdn.com:443
@@ -789,16 +788,244 @@ zj-lishui-cu-v4.ip.zstaticcdn.com:443
 zj-shaoxing-cu-v4.ip.zstaticcdn.com:443
 浙江温州联通
 zj-wenzhou-cu-v4.ip.zstaticcdn.com:443`;
-      const rawLines = rawNodeData.split('\n').map(l => l.trim()).filter(l => l);
+
+      const rawNodeDataDual = `河北
+河北移动
+he-cm-dualstack.ip.zstaticcdn.com:80
+河北联通
+he-cu-dualstack.ip.zstaticcdn.com:80
+河北电信
+he-ct-dualstack.ip.zstaticcdn.com:80
+山西
+山西移动
+sx-cm-dualstack.ip.zstaticcdn.com:80
+山西联通
+sx-cu-dualstack.ip.zstaticcdn.com:80
+山西电信
+sx-ct-dualstack.ip.zstaticcdn.com:80
+辽宁
+辽宁移动
+ln-cm-dualstack.ip.zstaticcdn.com:80
+辽宁联通
+ln-cu-dualstack.ip.zstaticcdn.com:80
+辽宁电信
+ln-ct-dualstack.ip.zstaticcdn.com:80
+吉林
+吉林移动
+jl-cm-dualstack.ip.zstaticcdn.com:80
+吉林联通
+jl-cu-dualstack.ip.zstaticcdn.com:80
+吉林电信
+jl-ct-dualstack.ip.zstaticcdn.com:80
+黑龙江
+黑龙江移动
+hl-cm-dualstack.ip.zstaticcdn.com:80
+黑龙江联通
+hl-cu-dualstack.ip.zstaticcdn.com:80
+黑龙江电信
+hl-ct-dualstack.ip.zstaticcdn.com:80
+江苏
+江苏移动
+js-cm-dualstack.ip.zstaticcdn.com:80
+江苏联通
+js-cu-dualstack.ip.zstaticcdn.com:80
+江苏电信
+js-ct-dualstack.ip.zstaticcdn.com:80
+浙江
+浙江移动
+zj-cm-dualstack.ip.zstaticcdn.com:80
+浙江联通
+zj-cu-dualstack.ip.zstaticcdn.com:80
+浙江电信
+zj-ct-dualstack.ip.zstaticcdn.com:80
+安徽
+安徽移动
+ah-cm-dualstack.ip.zstaticcdn.com:80
+安徽联通
+ah-cu-dualstack.ip.zstaticcdn.com:80
+安徽电信
+ah-ct-dualstack.ip.zstaticcdn.com:80
+福建
+福建移动
+fj-cm-dualstack.ip.zstaticcdn.com:80
+福建联通
+fj-cu-dualstack.ip.zstaticcdn.com:80
+福建电信
+fj-ct-dualstack.ip.zstaticcdn.com:80
+江西
+江西移动
+jx-cm-dualstack.ip.zstaticcdn.com:80
+江西联通
+jx-cu-dualstack.ip.zstaticcdn.com:80
+江西电信
+jx-ct-dualstack.ip.zstaticcdn.com:80
+山东
+山东移动
+sd-cm-dualstack.ip.zstaticcdn.com:80
+山东联通
+sd-cu-dualstack.ip.zstaticcdn.com:80
+山东电信
+sd-ct-dualstack.ip.zstaticcdn.com:80
+河南
+河南移动
+ha-cm-dualstack.ip.zstaticcdn.com:80
+河南联通
+ha-cu-dualstack.ip.zstaticcdn.com:80
+河南电信
+ha-ct-dualstack.ip.zstaticcdn.com:80
+湖北
+湖北移动
+hb-cm-dualstack.ip.zstaticcdn.com:80
+湖北联通
+hb-cu-dualstack.ip.zstaticcdn.com:80
+湖北电信
+hb-ct-dualstack.ip.zstaticcdn.com:80
+湖南
+湖南移动
+hn-cm-dualstack.ip.zstaticcdn.com:80
+湖南联通
+hn-cu-dualstack.ip.zstaticcdn.com:80
+湖南电信
+hn-ct-dualstack.ip.zstaticcdn.com:80
+广东
+广东移动
+gd-cm-dualstack.ip.zstaticcdn.com:80
+广东联通
+gd-cu-dualstack.ip.zstaticcdn.com:80
+广东电信
+gd-ct-dualstack.ip.zstaticcdn.com:80
+海南
+海南移动
+hi-cm-dualstack.ip.zstaticcdn.com:80
+海南联通
+hi-cu-dualstack.ip.zstaticcdn.com:80
+海南电信
+hi-ct-dualstack.ip.zstaticcdn.com:80
+四川
+四川移动
+sc-cm-dualstack.ip.zstaticcdn.com:80
+四川联通
+sc-cu-dualstack.ip.zstaticcdn.com:80
+四川电信
+sc-ct-dualstack.ip.zstaticcdn.com:80
+贵州
+贵州移动
+gz-cm-dualstack.ip.zstaticcdn.com:80
+贵州联通
+gz-cu-dualstack.ip.zstaticcdn.com:80
+贵州电信
+gz-ct-dualstack.ip.zstaticcdn.com:80
+云南
+云南移动
+yn-cm-dualstack.ip.zstaticcdn.com:80
+云南联通
+yn-cu-dualstack.ip.zstaticcdn.com:80
+云南电信
+yn-ct-dualstack.ip.zstaticcdn.com:80
+陕西
+陕西移动
+sn-cm-dualstack.ip.zstaticcdn.com:80
+陕西联通
+sn-cu-dualstack.ip.zstaticcdn.com:80
+陕西电信
+sn-ct-dualstack.ip.zstaticcdn.com:80
+甘肃
+甘肃移动
+gs-cm-dualstack.ip.zstaticcdn.com:80
+甘肃联通
+gs-cu-dualstack.ip.zstaticcdn.com:80
+甘肃电信
+gs-ct-dualstack.ip.zstaticcdn.com:80
+青海
+青海移动
+qh-cm-dualstack.ip.zstaticcdn.com:80
+青海联通
+qh-cu-dualstack.ip.zstaticcdn.com:80
+青海电信
+qh-ct-dualstack.ip.zstaticcdn.com:80
+内蒙古
+内蒙古移动
+nm-cm-dualstack.ip.zstaticcdn.com:80
+内蒙古联通
+nm-cu-dualstack.ip.zstaticcdn.com:80
+内蒙古电信
+nm-ct-dualstack.ip.zstaticcdn.com:80
+广西
+广西移动
+gx-cm-dualstack.ip.zstaticcdn.com:80
+广西联通
+gx-cu-dualstack.ip.zstaticcdn.com:80
+广西电信
+gx-ct-dualstack.ip.zstaticcdn.com:80
+西藏
+西藏移动
+xz-cm-dualstack.ip.zstaticcdn.com:80
+西藏联通
+xz-cu-dualstack.ip.zstaticcdn.com:80
+西藏电信
+xz-ct-dualstack.ip.zstaticcdn.com:80
+宁夏
+宁夏移动
+nx-cm-dualstack.ip.zstaticcdn.com:80
+宁夏联通
+nx-cu-dualstack.ip.zstaticcdn.com:80
+宁夏电信
+nx-ct-dualstack.ip.zstaticcdn.com:80
+新疆
+新疆移动
+xj-cm-dualstack.ip.zstaticcdn.com:80
+新疆联通
+xj-cu-dualstack.ip.zstaticcdn.com:80
+新疆电信
+xj-ct-dualstack.ip.zstaticcdn.com:80
+北京
+北京移动
+bj-cm-dualstack.ip.zstaticcdn.com:80
+北京联通
+bj-cu-dualstack.ip.zstaticcdn.com:80
+北京电信
+bj-ct-dualstack.ip.zstaticcdn.com:80
+天津
+天津移动
+tj-cm-dualstack.ip.zstaticcdn.com:80
+天津联通
+tj-cu-dualstack.ip.zstaticcdn.com:80
+天津电信
+tj-ct-dualstack.ip.zstaticcdn.com:80
+上海
+上海移动
+sh-cm-dualstack.ip.zstaticcdn.com:80
+上海联通
+sh-cu-dualstack.ip.zstaticcdn.com:80
+上海电信
+sh-ct-dualstack.ip.zstaticcdn.com:80
+重庆
+重庆移动
+cq-cm-dualstack.ip.zstaticcdn.com:80
+重庆联通
+cq-cu-dualstack.ip.zstaticcdn.com:80
+重庆电信
+cq-ct-dualstack.ip.zstaticcdn.com:80`;
+
       const pingOpts = { ct: [], cu: [], cm: [] };
-      for (let i = 0; i < rawLines.length; i += 2) {
-         const name = rawLines[i];
-         if (name === '市级节点') { i--; continue; }
-         const host = (rawLines[i+1] || '').split(':')[0]; // 剥离443端口保证curl正常测试
-         if (name.includes('电信')) pingOpts.ct.push({name, host});
-         else if (name.includes('联通')) pingOpts.cu.push({name, host});
-         else if (name.includes('移动')) pingOpts.cm.push({name, host});
-      }
+      
+      const parseNodes = (rawText, label) => {
+        const lines = rawText.split('\n').map(l => l.trim()).filter(l => l);
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          if (line.includes('移动') || line.includes('联通') || line.includes('电信')) {
+            const name = `${line} (${label})`;
+            const host = (lines[i+1] || '').split(':')[0]; // 剥离端口保证curl正常测试
+            if (line.includes('电信')) pingOpts.ct.push({name, host});
+            else if (line.includes('联通')) pingOpts.cu.push({name, host});
+            else if (line.includes('移动')) pingOpts.cm.push({name, host});
+            i++; // 跳过紧跟的host行
+          }
+        }
+      };
+
+      parseNodes(rawNodeDataV4, 'IPv4');
+      parseNodes(rawNodeDataDual, '双栈');
 
       const buildOpts = (group, selectedVal) => {
           let opts = `<option value="default" ${selectedVal === 'default' ? 'selected' : ''}>默认节点 (双栈多节点轮询)</option>`;
@@ -950,6 +1177,7 @@ zj-wenzhou-cu-v4.ip.zstaticcdn.com:443`;
               <div class="form-group">
                 <label>移动 (CM) 测速节点</label>
                 <select id="cfg_ping_node_cm">${buildOpts(pingOpts.cm, sys.ping_node_cm)}</select>
+                <span style="font-size:12px; color:#ef4444; margin-top:5px; display:block; font-weight:bold;">* 注意：如果 VPS 的 IPv4 被墙（或网络不通），三网延迟会直接超时，显示为 2000ms（或 2001ms）。</span>
                 <span style="font-size:12px; color:#888; margin-top:5px; display:block;">* 提示：修改节点或上报间隔后无需重启或重装，探针会在下一次心跳（几秒内）自动热更新配置。</span>
               </div>
 
