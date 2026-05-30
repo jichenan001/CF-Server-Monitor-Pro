@@ -244,7 +244,8 @@ export default {
             const currentSlot = Math.max(1, Math.floor((Date.now() - EPOCH_START) / 3000));
             const hash = await miniHash(`${currentSlot}-${host}`);
             
-            if (parseInt(hash.slice(-1), 16) <= 12) {
+            // 降低哈希难度，减少全网空块的产生 (尾数 <= 14，约93.75%的概率)
+            if (parseInt(hash.slice(-1), 16) <= 14) {
                 const payloadStr = JSON.stringify({ vps_count: localVpsCount, total_asset: localAsset });
                 const blockData = { slot_id: currentSlot, proposer_domain: host, block_hash: hash, payload: payloadStr };
                 
@@ -255,7 +256,6 @@ export default {
                 await env.DB.prepare(`INSERT OR REPLACE INTO blockchain_ledger (slot_id, proposer_domain, block_hash, payload, timestamp) VALUES (?, ?, ?, ?, ?)`).bind(currentSlot, host, hash, payloadStr, Date.now()).run();
             }
 
-            // 【强制同步协议】：确保高度迅速对齐
             const syncFromPeer = async (peerDomain) => {
                 const localTop = await env.DB.prepare('SELECT slot_id FROM blockchain_ledger ORDER BY slot_id DESC LIMIT 1').first();
                 const since = localTop ? localTop.slot_id : 0;
@@ -281,12 +281,9 @@ export default {
                 } catch(e) {}
             };
 
-            // 每 5 秒心跳必然向种子节点请求同步，消除断层
             if (host !== SEED_NODE) {
                 await syncFromPeer(SEED_NODE);
             }
-            
-            // 随机找一个其他节点互相同步
             if (Math.random() < 0.5) {
                 const { results: rBeacons } = await env.DB.prepare(`SELECT domain FROM blockchain_peers WHERE is_beacon IN ('true', '1') AND domain != ? ORDER BY RANDOM() LIMIT 1`).bind(host).all();
                 if (rBeacons.length > 0) await syncFromPeer(rBeacons[0].domain);
@@ -453,27 +450,18 @@ export default {
       .theme2 .stat-subtext, .theme4 .stat-subtext, .theme5 .stat-subtext { color: rgba(255,255,255,0.6); }
       
       .grid-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 15px; }
-      .vps-card { display: flex; flex-direction: row; justify-content: space-between; align-items: stretch; background: white; padding: 18px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); text-decoration: none; color: inherit; border: 1px solid transparent; transition: all 0.2s ease; gap: 15px; min-height: 140px; box-sizing: border-box; overflow: hidden; margin-bottom: 0px; }
+      .vps-card { display: flex; justify-content: space-between; align-items: stretch; background: white; padding: 18px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); text-decoration: none; color: inherit; border: 1px solid transparent; transition: all 0.2s ease; }
       .card-left { flex: 0 0 180px; display: flex; flex-direction: column; justify-content: center; }
-      .card-right { flex: 1; display: flex; flex-direction: column; justify-content: center; border-left: 1px solid rgba(150,150,150,0.1); padding-left: 15px; min-width: 0; }
+      .card-title { display: flex; align-items: center; margin-bottom: 4px; }
+      .card-title-text { font-weight: 600; }
+      .status-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; flex-shrink:0; }
+      .card-meta { font-size: 12px; color: #6b7280; margin-bottom: 3px; }
+      .card-badges { margin-top: 10px; display: flex; gap: 5px; flex-wrap: wrap; }
+      .badge { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; color: white; }
+      .badge-bw { background: #3b82f6; } .badge-tf { background: #10b981; } .badge-v4 { background: #a855f7; } .badge-v6 { background: #ec4899; }
+      .card-right { flex: 1; display: flex; flex-direction: column; justify-content: center; padding-left: 15px; border-left: 1px solid rgba(150,150,150,0.1); min-width: 0; }
       .stat-bar { width: 100%; height: 4px; background: #e5e7eb; border-radius: 2px; overflow: hidden; }
       .stat-bar > div { height: 100%; border-radius: 2px; transition: width 0.3s; }
-
-      .consensus-panel { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; background: rgba(16, 185, 129, 0.05); border: 1px solid rgba(16, 185, 129, 0.2); padding: 15px 20px; border-radius: 12px; margin-bottom: 25px; font-family: monospace; box-sizing: border-box;}
-      .theme2 .consensus-panel, .theme5 .consensus-panel { background: rgba(88, 166, 255, 0.05); border-color: rgba(88, 166, 255, 0.2); }
-      .c-label { font-size: 12px; color: #64748b; text-transform: uppercase; margin-bottom: 4px; font-weight: 600; }
-      .c-val { font-size: 18px; font-weight: bold; color: #10b981; }
-      .theme2 .c-val, .theme5 .c-val { color: #58a6ff; }
-      .ticker-bar { width: 100%; height: 4px; background: #e2e8f0; margin-top: 8px; border-radius: 2px; overflow: hidden; }
-      .ticker-fill { height: 100%; background: #10b981; transition: width 0.1s linear; }
-      .theme2 .ticker-bar, .theme5 .ticker-bar { background: #30363d; }
-      .theme2 .ticker-fill, .theme5 .ticker-fill { background: #58a6ff; }
-      
-      .theme4 .consensus-panel { background: rgba(255, 255, 255, 0.15); border-color: rgba(255, 255, 255, 0.3); backdrop-filter: blur(10px); color: #fff; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-      .theme4 .c-label { color: rgba(255, 255, 255, 0.9); text-shadow: 0 1px 2px rgba(0,0,0,0.2); }
-      .theme4 .c-val { color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
-      .theme4 .ticker-bar { background: rgba(0,0,0,0.2); }
-      .theme4 .ticker-fill { background: #00f2fe; }
     `;
 
     // ==========================================
@@ -1744,6 +1732,7 @@ while true; do
   
   PAYLOAD="{\\"id\\": \\"\\$SERVER_ID\\", \\"secret\\": \\"\\$SECRET\\", \\"metrics\\": { \\"cpu\\": \\"\\$CPU\\", \\"ram\\": \\"\\$RAM\\", \\"ram_total\\": \\"\\$RAM_TOTAL\\", \\"ram_used\\": \\"\\$RAM_USED\\", \\"swap_total\\": \\"\\$SWAP_TOTAL\\", \\"swap_used\\": \\"\\$SWAP_USED\\", \\"disk\\": \\"\\$DISK\\", \\"disk_total\\": \\"\\$DISK_TOTAL\\", \\"disk_used\\": \\"\\$DISK_USED\\", \\"load\\": \\"\\$LOAD\\", \\"uptime\\": \\"\\$UPTIME\\", \\"boot_time\\": \\"\\$BOOT_TIME\\", \\"net_rx\\": \\"\\$RX_NOW\\", \\"net_tx\\": \\"\\$TX_NOW\\", \\"net_in_speed\\": \\"\\$RX_SPEED\\", \\"net_out_speed\\": \\"\\$TX_SPEED\\", \\"os\\": \\"\\$OS\\", \\"arch\\": \\"\\$ARCH\\", \\"cpu_info\\": \\"\\$CPU_INFO\\", \\"processes\\": \\"\\$PROCESSES\\", \\"tcp_conn\\": \\"\\$TCP_CONN\\", \\"udp_conn\\": \\"\\$UDP_CONN\\", \\"ip_v4\\": \\"\\$IPV4\\", \\"ip_v6\\": \\"\\$IPV6\\", \\"ping_ct\\": \\"\\$PING_CT\\", \\"ping_cu\\": \\"\\$PING_CU\\", \\"ping_cm\\": \\"\\$PING_CM\\", \\"ping_bd\\": \\"\\$PING_BD\\", \\"virt\\": \\"\\$VIRT\\" }}"
   
+  # 接收 Cloudflare Worker 返回的最新配置进行热重载
   RES=\\$(${cmdApp} -s -X POST -H "Content-Type: application/json" -d "\\$PAYLOAD" "\\$WORKER_URL" 2>/dev/null)
   
   if echo "\\$RES" | grep -q "INTERVAL="; then
@@ -1915,12 +1904,12 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
 
         ctx.waitUntil(checkOfflineNodes());
         
-        // Web3 共识出块与强制广播同步
         const { results: allS } = await env.DB.prepare('SELECT price, expire_date FROM servers WHERE is_hidden="false"').all();
         let currentAsset = 0;
         for(const s of allS) {
             currentAsset += calcServerAsset(s, nowMs).amount;
         }
+        
         ctx.waitUntil(mineAndGossip(currentAsset, allS.length));
 
         return new Response(`INTERVAL=${sys.report_interval || '5'}|CT=${sys.ping_node_ct || 'default'}|CU=${sys.ping_node_cu || 'default'}|CM=${sys.ping_node_cm || 'default'}`, { status: 200 });
@@ -2173,7 +2162,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
       }
 
       // ----------------------------------------
-      // 大盘聚合首页 (包含卡片、表格、地图、区块功能)
+      // 大盘聚合首页
       // ----------------------------------------
       let { results } = await env.DB.prepare('SELECT * FROM servers').all();
       results = results.filter(s => s.is_hidden !== 'true');
@@ -2225,7 +2214,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
         }
       }
 
-      // Web3 获取去中心化排名 (本地动态对比) 结合心跳活性淘汰
+      // Web3 获取去中心化排名与节点数量 (引入活性淘汰机制)
       let localRank = 1;
       let globalNetAsset = totalAsset;
       let globalProposer = '--';
@@ -2262,9 +2251,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
           
           const nCountRow = await env.DB.prepare('SELECT count(*) as c FROM blockchain_peers WHERE last_seen > ?').bind(activeThreshold).first();
           globalNodes = nCountRow && nCountRow.c > 0 ? nCountRow.c : 1;
-      } catch(e) {
-          console.error("Web3 Data Fetch Error:", e);
-      }
+      } catch(e) {}
 
       let filterTagsHtml = `<span class="filter-tag" data-code="all" onclick="setFilter('all')">全部 ${results.length}</span>`;
       for (const [code, count] of Object.entries(countryStats)) {
@@ -2334,6 +2321,7 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
             const diskUsedStr = formatBytes((parseFloat(server.disk_used || 0) * 1048576).toString());
             const diskTotalStr = formatBytes((parseFloat(server.disk_total || 0) * 1048576).toString());
 
+            // 【还原】恢复原版的 vps-card HTML 和 CSS 布局，带有绿灯点
             cardContentHtml += `
               <a href="/?id=${server.id}" class="vps-card" data-country="${cCode}">
                 <div class="card-left">
@@ -2378,10 +2366,10 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
               </a>
             `;
 
-            // 【核心修复】状态表格栏采用强色彩文字防遮挡
+            // 【还原】恢复原版的 table-row 绿灯点
             tableBodyHtml += `
               <tr onclick="window.location.href='/?id=${server.id}'" style="cursor:pointer;" data-country="${cCode}">
-                <td style="text-align:center; font-weight:bold; color:${statusColor}; font-size:12px;">${isOnline ? '在线' : '离线'}</td>
+                <td style="text-align:center;"><div class="status-dot" style="background:${statusColor}; display:inline-block; margin:0;"></div></td>
                 <td><b>${server.name}</b></td>
                 <td>${flagHtml}</td>
                 <td><span class="os-text">${server.os || '-'} / ${server.arch || '-'} / ${server.virt || '-'}</span></td>
@@ -2414,7 +2402,6 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
         }
       }
 
-      // 【核心新增】提取最新区块生成区块链浏览器表格
       let blockExplorerRows = '';
       try {
           const { results: recentBlocks } = await env.DB.prepare('SELECT * FROM blockchain_ledger ORDER BY slot_id DESC LIMIT 50').all();
@@ -2431,9 +2418,6 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
       } catch(e){}
       if (!blockExplorerRows) blockExplorerRows = '<tr><td colspan="4" style="text-align:center; padding:20px; color:#888;">暂无区块数据，等待网络共识...</td></tr>';
 
-      // =====================================
-      // 完整无截断的 Ajax 和 HTML 返回
-      // =====================================
       if (isAjax) {
           const ajaxResponse = `
              <div id="ajax-stats-payload" data-rank="${localRank}" data-net-asset="${globalNetAsset.toFixed(2)}" data-proposer="${globalProposer}" data-height="${currentHeight}" data-beacons="${activeBeacons}" data-nodes="${globalNodes}" style="display:none;"></div>
@@ -2474,17 +2458,24 @@ echo "✅ Linux 探针安装成功！热重载功能已启用。"
           .theme2 .ticker-bar, .theme5 .ticker-bar { background: #30363d; }
           .theme2 .ticker-fill, .theme5 .ticker-fill { background: #58a6ff; }
           
-          /* 毛玻璃主题防重叠强覆盖 */
           .theme4 .consensus-panel { background: rgba(255, 255, 255, 0.15); border-color: rgba(255, 255, 255, 0.3); backdrop-filter: blur(10px); color: #fff; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
           .theme4 .c-label { color: rgba(255, 255, 255, 0.9); text-shadow: 0 1px 2px rgba(0,0,0,0.2); }
           .theme4 .c-val { color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.3); }
           .theme4 .ticker-bar { background: rgba(0,0,0,0.2); }
           .theme4 .ticker-fill { background: #00f2fe; }
 
+          /* 【还原】原版卡片布局 CSS */
           .grid-container { display: grid; grid-template-columns: repeat(auto-fill, minmax(480px, 1fr)); gap: 15px; }
-          .vps-card { display: flex; flex-direction: row; justify-content: space-between; align-items: stretch; background: white; padding: 18px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); text-decoration: none; color: inherit; border: 1px solid transparent; transition: all 0.2s ease; gap: 15px; min-height: 140px; box-sizing: border-box; overflow: hidden; margin-bottom: 0px; }
+          .vps-card { display: flex; justify-content: space-between; align-items: stretch; background: white; padding: 18px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.04); text-decoration: none; color: inherit; border: 1px solid transparent; transition: all 0.2s ease; }
           .card-left { flex: 0 0 180px; display: flex; flex-direction: column; justify-content: center; }
-          .card-right { flex: 1; display: flex; flex-direction: column; justify-content: center; border-left: 1px solid rgba(150,150,150,0.1); padding-left: 15px; min-width: 0; }
+          .card-title { display: flex; align-items: center; margin-bottom: 4px; }
+          .card-title-text { font-weight: 600; }
+          .status-dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; flex-shrink:0; }
+          .card-meta { font-size: 12px; color: #6b7280; margin-bottom: 3px; }
+          .card-badges { margin-top: 10px; display: flex; gap: 5px; flex-wrap: wrap; }
+          .badge { padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600; color: white; }
+          .badge-bw { background: #3b82f6; } .badge-tf { background: #10b981; } .badge-v4 { background: #a855f7; } .badge-v6 { background: #ec4899; }
+          .card-right { flex: 1; display: flex; flex-direction: column; justify-content: center; padding-left: 15px; border-left: 1px solid rgba(150,150,150,0.1); min-width: 0; }
           
           body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f5f7; color: #333; margin: 0; padding: 20px; }
           .container { max-width: 1200px; margin: 0 auto; }
