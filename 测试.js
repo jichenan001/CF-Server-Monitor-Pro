@@ -1,9 +1,9 @@
 // ==========================================
 // 创世时间戳与网络参数 (Genesis Setup)
 // ==========================================
-const PROTOCOL_VERSION = 'v14_pure_chain'; // 保持V14协议，不重置账本，仅升级网络层
+const PROTOCOL_VERSION = 'v14_pure_chain'; // 🚀 V14 大一统净化协议：已稳定出块
 const EPOCH_START = 1780239482981; 
-const GENESIS_NODE = 'https://odd-art-043f.a68561918.workers.dev'; 
+const GENESIS_NODE = 'https://tanzhen.800620.xyz'; // 以你的主站为锚点
 const DEFAULT_SEEDS = [
     GENESIS_NODE,
     'https://odd-art-043f.a68561918.workers.dev',
@@ -764,7 +764,6 @@ export default {
                         const tip = await env.DB.prepare('SELECT block_hash FROM blockchain_ledger WHERE status = 1 ORDER BY slot_id DESC LIMIT 1').first();
                         if (tip && tip.block_hash === block.block_hash) {
                             const blockData = { slot_id: block.slot_id, proposer_domain: host, block_hash: block.block_hash, parent_hash: block.parent_hash, payload: block.payload, timestamp: block.timestamp, total_difficulty: blockDifficulty, signature: block.signature };
-                            // 🚀 暴力强化：广播目标增加到 15 个，彻底防止丢包分叉
                             const { results: beacons } = await env.DB.prepare(`SELECT domain FROM blockchain_peers WHERE is_beacon IN ('true', '1') AND domain != ? ORDER BY last_seen DESC LIMIT 15`).bind(host).all();
                             for (const b of beacons) {
                                 fetchWithTimeSync(`${b.domain}/api/consensus/submit`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(blockData) }, b.domain).catch(() => {});
@@ -922,7 +921,6 @@ export default {
 
             const blockData = { slot_id: currentSlot, proposer_domain: host, block_hash: hash, parent_hash: parentHash, payload: payloadStr, timestamp: currentNetTime, total_difficulty: currentDifficulty, signature: signature };
             
-            // 🚀 暴力强化：自身挖出块后，也要向15个节点广播，确保不会分叉
             const gossipLimit = 15; 
             const { results: beacons } = await env.DB.prepare(`SELECT domain FROM blockchain_peers WHERE is_beacon IN ('true', '1') AND domain != ? ORDER BY RANDOM() LIMIT ?`).bind(host, gossipLimit).all();
             for (const b of beacons) {
@@ -2163,11 +2161,58 @@ echo "✅ Linux 高精脱钩版探针安装成功！"
       }
 
       let localRank = 1; let globalNetAsset = totalAsset; let globalProposer = '--'; let currentHeight = 0; let activeBeacons = 0; let globalNodes = 1; let pendingTxsCount = 0;
+      let rankTableHtml = '';
+      
       try {
           const activeThreshold = Date.now() - 86400000; 
-          const { results: rankList } = await env.DB.prepare('SELECT domain, total_asset FROM blockchain_peers WHERE last_seen > ?').bind(activeThreshold).all();
+          const { results: rankList } = await env.DB.prepare('SELECT domain, vps_count, total_asset, last_seen FROM blockchain_peers WHERE last_seen > ?').bind(activeThreshold).all();
           let higherCount = 0; let otherAssets = 0;
           
+          // 🚀 1. 新增：拉取最近300个区块，智能建立 [域名 -> 钱包] 映射表
+          let domainToWallet = {};
+          try {
+              const { results: recentCoinbases } = await env.DB.prepare("SELECT proposer_domain, payload FROM blockchain_ledger WHERE status = 1 ORDER BY slot_id DESC LIMIT 300").all();
+              for (const b of recentCoinbases) {
+                  if (!domainToWallet[b.proposer_domain]) {
+                      try {
+                          const pl = JSON.parse(b.payload);
+                          const cbTx = pl.txs.find(t => t.type === 'COINBASE');
+                          if (cbTx && cbTx.to) domainToWallet[b.proposer_domain] = cbTx.to;
+                      } catch(e) {}
+                  }
+              }
+          } catch(e) {}
+          
+          // 🚀 获取当前所有钱包的余额
+          let walletBalances = {};
+          try {
+              const { results: wBals } = await env.DB.prepare('SELECT address, balance FROM blockchain_wallets').all();
+              wBals.forEach(w => walletBalances[w.address] = w.balance);
+          } catch(e) {}
+
+          // 🚀 构建排行榜 HTML
+          let sortedPeers = [...rankList];
+          sortedPeers.sort((a, b) => {
+              let aA = Math.min(parseFloat(a.total_asset)||0, 500000);
+              let aB = Math.min(parseFloat(b.total_asset)||0, 500000);
+              if (aB !== aA) return aB - aA;
+              return a.domain > b.domain ? 1 : -1;
+          });
+
+          sortedPeers.forEach((p, idx) => {
+              let pAsset = Math.min(parseFloat(p.total_asset)||0, 500000);
+              let isMe = p.domain === host;
+              let rowStyle = isMe ? 'background: rgba(59, 130, 246, 0.1); font-weight: bold;' : '';
+              let vpsCount = p.vps_count || 0;
+              let ls = new Date(p.last_seen + 8*3600000).toISOString().replace('T',' ').substring(5,16); 
+              
+              let dWallet = domainToWallet[p.domain];
+              let dCycle = dWallet && walletBalances[dWallet] ? walletBalances[dWallet].toFixed(2) : '0.00';
+              let cycleHtml = dWallet ? `<a href="javascript:void(0)" onclick="searchBalance('${dWallet}'); document.getElementById('rankModal').style.display='none'; switchView('block');" style="color:#8b5cf6;text-decoration:none;">${dCycle}</a>` : `<span style="color:#9ca3af;">0.00</span>`;
+
+              rankTableHtml += `<tr style="${rowStyle}"><td>${idx + 1}</td><td style="max-width:200px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" title="${p.domain}">${p.domain}</td><td>${vpsCount}</td><td style="color:#10b981;font-weight:bold;">${pAsset.toFixed(2)}</td><td style="font-weight:bold;">${cycleHtml}</td><td>${ls}</td></tr>`;
+          });
+
           for (const p of rankList) {
               if (p.domain !== host) {
                   let pAsset = parseFloat(p.total_asset) || 0;
@@ -2301,6 +2346,7 @@ echo "✅ Linux 高精脱钩版探针安装成功！"
         }
       }
 
+      // 🚀 2. 修改：点击富豪榜地址，直接调用 searchBalance 函数填入上方并搜索
       let richListRows = '';
       try {
           const { results: rList } = await env.DB.prepare('SELECT address, balance FROM blockchain_wallets ORDER BY balance DESC LIMIT 10').all();
@@ -2341,6 +2387,7 @@ echo "✅ Linux 高精脱钩版探针安装成功！"
               <tbody id="ajax-table" style="display:none;">${tableBodyHtml || '<tr><td>暂无数据</td></tr>'}</tbody>
               <tbody id="ajax-blocks" style="display:none;">${blockExplorerRows}</tbody>
               <tbody id="ajax-richlist" style="display:none;">${richListRows}</tbody>
+              <tbody id="ajax-ranklist" style="display:none;">${rankTableHtml}</tbody>
               <script id="map-data" type="application/json">${JSON.stringify(countryStats)}</script>
           `;
           return new Response(ajaxResponse, { headers: { 'Content-Type': 'text/html' } });
@@ -2405,7 +2452,7 @@ echo "✅ Linux 高精脱钩版探针安装成功！"
           </div>
 
           <div class="global-stats" style="margin-bottom:15px;">
-            <div class="g-item"><div class="g-label">全网综合排名 / 内存池待打包</div><div class="g-val">🏆 第 <span style="color:#f59e0b" id="ui-rank">${localRank}</span> 名 | <span style="color:#8b5cf6;" id="ui-pending-txs">${pendingTxsCount}</span> 笔</div></div>
+            <div class="g-item"><div class="g-label">全网综合排名 / 内存池待打包</div><div class="g-val">🏆 第 <a href="javascript:void(0)" onclick="document.getElementById('rankModal').style.display='block'" style="color:#f59e0b; text-decoration:underline; cursor:pointer;" id="ui-rank">${localRank}</a> 名 | <span style="color:#8b5cf6;" id="ui-pending-txs">${pendingTxsCount}</span> 笔</div></div>
             <div class="g-item"><div class="g-label">全网探针总资产重力</div><div class="g-val">💰 <span id="ui-net-asset">${(globalNetAsset || 0).toFixed(2)}</span> CNY</div></div>
           </div>
 
@@ -2431,6 +2478,22 @@ echo "✅ Linux 高精脱钩版探针安装成功！"
         </div>
 
         <div id="txTraceModal" class="modal"><div class="modal-content"><h3>🔗 区块交易流水</h3><div id="txTraceList" style="max-height:400px; overflow-y:auto; margin-bottom:15px;"></div><button onclick="document.getElementById('txTraceModal').style.display='none'">关闭</button></div></div>
+        
+        <div id="rankModal" class="modal">
+          <div class="modal-content" style="width: 800px; max-width: 95%;">
+            <h3 style="margin-top:0;">🏆 全网权重节点排名 (Beacon Nodes)</h3>
+            <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+              <table class="custom-table">
+                <thead><tr><th>排名</th><th>节点域名</th><th>探针数</th><th>资产重力(CNY)</th><th>Cycle 余额</th><th>最后活跃</th></tr></thead>
+                <tbody id="table-rank-body">${rankTableHtml}</tbody>
+              </table>
+            </div>
+            <div style="text-align:right; margin-top:15px;">
+              <button class="btn btn-blue" onclick="document.getElementById('rankModal').style.display='none'">关闭</button>
+            </div>
+          </div>
+        </div>
+
         <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
         <script>
           let mapInitialized = false; window.currentFilter = 'all';
@@ -2451,6 +2514,13 @@ echo "✅ Linux 高精脱钩版探针安装成功！"
               document.querySelectorAll('.vps-card').forEach(el => el.style.display = (window.currentFilter === 'all' || el.dataset.country === window.currentFilter) ? 'flex' : 'none');
               document.querySelectorAll('#ajax-table tr').forEach(el => el.style.display = (window.currentFilter === 'all' || el.dataset.country === window.currentFilter) ? '' : 'none');
           }
+          
+          // 🚀 4. 新增：快捷搜索功能
+          function searchBalance(addr) {
+              document.getElementById('radar-input').value = addr;
+              executeSearch();
+          }
+
           async function executeSearch() {
               const addr = document.getElementById('radar-input').value.trim(); if(!addr) return;
               const resDiv = document.getElementById('ui-balance-result'); resDiv.style.display = 'block';
@@ -2486,8 +2556,9 @@ echo "✅ Linux 高精脱钩版探针安装成功！"
               if (payloadData) {
                   document.getElementById('ui-rank').innerText = payloadData.getAttribute('data-rank'); document.getElementById('ui-net-asset').innerText = payloadData.getAttribute('data-net-asset'); document.getElementById('ui-proposer').innerText = payloadData.getAttribute('data-proposer'); document.getElementById('ui-height').innerText = payloadData.getAttribute('data-height'); document.getElementById('ui-beacons').innerText = payloadData.getAttribute('data-beacons'); document.getElementById('ui-nodes').innerText = payloadData.getAttribute('data-nodes'); document.getElementById('ui-pending-txs').innerText = payloadData.getAttribute('data-pending-txs');
               }
-              ['ajax-stats', 'ajax-cards', 'ajax-table', 'table-blocks-body', 'ajax-filters', 'map-data', 'ajax-richlist'].forEach(id => {
-                  const newEl = newDoc.getElementById(id === 'table-blocks-body' ? 'ajax-blocks' : id);
+              // 🚀 5. 修改：让排行数据表也能实现自动更新
+              ['ajax-stats', 'ajax-cards', 'ajax-table', 'table-blocks-body', 'ajax-filters', 'map-data', 'ajax-richlist', 'table-rank-body'].forEach(id => {
+                  const newEl = newDoc.getElementById(id === 'table-blocks-body' ? 'ajax-blocks' : (id === 'table-rank-body' ? 'ajax-ranklist' : id));
                   if (newEl && document.getElementById(id)) { if (id === 'map-data') document.getElementById(id).textContent = newEl.textContent; else document.getElementById(id).innerHTML = newEl.innerHTML; }
               });
               drawMarkers(); applyFilter(); 
