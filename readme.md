@@ -1,17 +1,21 @@
-# 功能越来越多了可以按需开启   
+## 🚀 快速部署与使用
 
-只想简单探针可以不用个性化的CSS代码，直接用默认主题就行，个性化CSS设置才是本探针创建的初心，功能可以不用，但必须要有，未来还会继续不断增加新的功能进去，你不需要的功能不代表别人不需要
+### 第一步：一键部署到 Cloudflare
+
 # 新人点击下方一键极速部署/老用户直接覆盖代码升级  
-已支持电报机器人管理后台
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/a63414262/CF-Server-Monitor-Pro)
 
-新用户GitHub 页面点击一键极速部署即可
 
-老用户worker.js 代码覆盖完成更新，属于是大版本更新，所有老用户的vps需要重新挂载agent命令
 
-先运行底部卸载命令！！！不然不卸载会导致显示离线错乱！！！卸载后再运行新的挂载命令
+### 第二步：添加节点并挂载探针
 
+1. 进入后台后，在“节点列表”区域输入「节点名称」，选择对应的「系统环境」，点击 **+ 添加新服务器**。
+2. 节点生成后，点击对应行的 **复制安装** 按钮。
+3. 登录你的被控端 VPS 或 Windows 服务器，粘贴命令并回车运行。
+4. 等待 5~10 秒，回到前台大盘刷新即可看到数据跳动。
+
+---
 ## 📸 界面预览
 
 演示站点：https://still-cell-000f.a6856191801.workers.dev   https://tanzhen.kejikkk.com
@@ -30,55 +34,53 @@
 
 
 ---
-## 🤝 参与贡献 (Contributing)
-
-如果你喜欢这个项目，欢迎提交 Pull Request，或者给个 ⭐ **Star** 支持一下！
 
 # ⚡ CF-Server-Monitor-Pro (Serverless 探针增强版)
 
 10台VPS以下可以使用cf版本轻量部署，10台VPS以上建议使用docker部署在免费容器northflank https://github.com/a63414262/server-monitor
-
-
-基于 Cloudflare Workers 和 D1 数据库构建的轻量级、零成本、高定制化的服务器探针大盘。
-完美复刻了商业级探针（如 Nezha）的核心体验，但无需额外部署任何服务端 VPS！完全白嫖 Cloudflare 的免费 Serverless 资源。
+基于 Cloudflare Workers 和 D1 数据库构建的零成本、高定制化服务器探针大盘。
+完全白嫖 Cloudflare 的免费 Serverless 资源，无需额外部署任何服务端 VPS！支持多节点大盘展示、单节点详情图表、全平台 Agent 监控与 Telegram 机器人深度交互。
 
 ## ✨ 核心特性
 
-### 🎨 极致的视觉与个性化体验
-- **高级自定义CSS个性化设置探针主题**：支持完全自定义CSS，实现网易云外链作为背景音乐自动单曲播放
-- **国旗智能匹配**：依托 Cloudflare 全球网络，自动识别 VPS 归属地并渲染超清图片国旗。
-- **无感 AJAX 热更新**：彻底抛弃传统的 <meta refresh>，采用 DOM 局部替换技术，数据实时跳动，页面零闪烁。
-- **多维视图切换**：内置 卡片 (Card)、表格 (Table) 和 世界地图 (Map) 三种视图，使用 LocalStorage 自动记忆用户偏好。
-- **管理后台新增**： Agent 上报间隔自定义设置，指定VPS前台显示或隐藏，添加对alpine系统的支持，可自动生成不同系统架构的一键探针命令。
-### 📊 专业级监控与大盘展示
-- **全局顶栏大盘**：直观展示服务器总数、在线/离线数、总计流量（入/出）以及全网实时网速。
-- **硬核双栈检测**：自动探测并高亮打标 VPS 的 **IPv4** 与 **IPv6** 网络连通性。
-- **商业级自定义徽章**：支持为每台机器单独设置**价格、到期时间（自动计算剩余天数）、带宽上限、流量配额**，并在前台以彩色徽章展示。
-- **精细化分组**：支持在后台为服务器设置组别，前台大盘将自动按分组进行优雅排版。
-- **过去24至实时详情图表**：点击任意节点卡片，即可查看基于 Chart.js 的 CPU、内存、磁盘、进程数、TCP/UDP 连接数及双向网速的过去24至实时跳动折线图以及三网延迟监控（来自https://zstaticcdn.com/nodes ）。
-- **月度流量重置**：内置流量增量累加机制，支持开启每月 1 号自动重置统计，无惧被控端 VPS 重启导致的数据清零。
+* **🚀 纯 Serverless 架构**：后端与数据库依托 Cloudflare，全球极速访问，彻底告别服务端宕机烦恼。
+* **🤖 Telegram 深度管理**：不仅支持节点离线/恢复告警推送，更支持通过 Telegram Bot 快捷菜单直接**添加节点、修改配置、全局设置交互**。
+* **🌐 Gossip 去中心化排行**：内置节点互联共识协议，自动加入全网数字资产与在线设备数量的排行榜。
+* **📊 全维度高精度监控**：
+* 支持 CPU、内存、磁盘、进程数、TCP/UDP 连接数实时折线图。
+* **硬核双栈检测**：自动探测 IPv4 与 IPv6 网络连通性。
+* **三网延迟监控**：实时获取电信 (CT)、联通 (CU)、移动 (CM) 及字节核心节点的 HTTP Ping 延迟。
+* **智能流量统计**：支持总流量累计，**新增按节点设定“重置日”**，每月自动清零重新统计。
 
-### 🛡️ 隐私与安全控制
-- **一键私密模式**：吃灰神机不想公开？在后台取消勾选“公开访问”，前台访客必须输入 admin 及密钥方可查看你的专属大盘。
-- **模块化展示开关**：价格、到期时间、带宽、流量等敏感信息，可在后台一键控制是否在前台显示。
 
-### 🚀 极简部署与高精度采集
-- **底层精准算法**：抛弃传统不稳定的 `top` 命令，采用 Linux 内核级 `/proc/stat` 计算 CPU 时钟差值，数据跳动精准顺滑。
-- **傻瓜式一键安装**：后台自动生成被控端 Bash 一键安装命令，自动注册 Systemd 守护进程。
+* **💻 全平台 Agent 支持**：后台一键生成挂载命令，完美支持 **Linux (Systemd)**、**Alpine (OpenRC)** 及 **Windows (PowerShell)**。
+* **🎨 极致视效与高定制性**：
+* 卡片、表格、世界地图三种视图无缝切换，本地记忆偏好。
+* AJAX 局部无感热更新，数据跳动页面不闪烁。
+* 支持自定义背景图片、全局透明光幕风格，预留完全自定义 CSS 与 JS 脚本注入入口。
+
+
 
 ---
 
+## 🤖 Telegram 机器人配置 (可选)
 
-🛠️ 高级自定义 (Advanced Injection)
+配置完成后，不仅可以接收掉线告警，还能直接在 TG 发送 `/menu` 调出可视化管理面板。
 
-本项目为喜欢折腾的开发者预留了最高权限的魔改入口。进入后台 全局设置 -> 前端主题风格 -> 选择“6. 完全自定义 CSS”：
+1. 在 Telegram 搜索 `@BotFather`，创建机器人并获取 **Bot Token**。
+2. 搜索 `@userinfobot` 或向你的机器人发送任意消息，获取你的 **Chat ID**。
+3. 登录探针后台，在 **Telegram 机器人管理与告警** 模块填入 Token 和 Chat ID。
+4. 将状态设置为 **开启告警与管理**，点击保存（系统将自动向 TG 注册 Webhook 和快捷菜单指令）。
 
-    自定义 CSS：重写面板的所有样式，支持背景、卡片透明度、字体颜色等。
+---
 
-    <head> 注入：你可以引入外部的 Google Fonts、TailwindCSS CDN 等。
+## 🎨 界面高度自定义 (进阶)
 
-    Script 注入：编写原生 JavaScript 接管页面逻辑，比如增加动态粒子背景、甚至通过设置 body { display: none; } 隐藏原生页面，利用 AJAX 请求 /api/server?id=xxx 用你自己的前端框架重绘大盘。
+后台支持极其强大的 DIY 功能，在「前端主题风格」中选择 **完全自定义 CSS (Custom Theme)**，即可解锁魔改：
 
+* **更换全屏高清壁纸**：在后台「自定义背景图片」直接贴入图片 URL（开启后卡片会自动变为优雅半透明光幕）。
+* **自定义 CSS 注入**：修改卡片颜色、字体、甚至隐藏指定元素。
+* **自定义 Script 注入**：支持插入纯原生 JavaScript 特效（如樱花飘落、鼠标跟随粒子等），不依赖第三方库，极速渲染。
 
 ### ✨ 自定义背景图片透明主题 CSS 演示
 
@@ -247,43 +249,57 @@ window.addEventListener('click', () => {
 ```
 
   https://imgapi.cn/api.php?fl=dongman&=4k   api接口可实现背景图片自动轮换   
-  
 
-##如何使用电报机器人通知：
-
-    获取 Token：在 Telegram 找 @BotFather 创建机器人并拿到 Token。
-
-    获取 Chat ID：在 Telegram 找 @userinfobot 发条消息，获取你的 ID。
-
-    配置：
-
-        登录你的探针后台 /admin。
-
-        在 Telegram 离线告警设置 区域，填入 Token 和 Chat ID。
-
-        将“开启通知”设为 启用告警。
-
-        点击 保存全局设置。
-
-    测试：如果你关掉一台 VPS 的 Agent，大约 2-3 分钟内，你的 Telegram 就会收到该节点的离线报警信息。当 Agent 重新启动，也会收到恢复通知。
-
-注意事项：
-
-    离线判断标准：代码中设定为 120 秒 未收到上报即发送告警。
-
-    静默处理：告警状态存储在数据库中，节点掉线只会发一次通知，直到它重新上线后再次掉线才会触发新告警。
 ---
 
-## ⚙️ 探针卸载 (Agent)
+## 🗑️ 探针卸载指南
 
-如果需要从被控端 VPS 卸载探针服务，请在 VPS 终端执行以下命令：
+如果你需要移除某台 VPS 上的探针：
+
+**方式一（推荐）**：在管理后台的节点列表中，直接点击该节点的 **一键卸载**，复制命令到对应 VPS 执行即可自动完全清理服务和残留。
+
+**方式二（手动执行）**：
+
+* **Linux (Debian/Ubuntu/CentOS)**:
 ```bash
 systemctl stop cf-probe.service
 systemctl disable cf-probe.service
-rm /etc/systemd/system/cf-probe.service
-rm /usr/local/bin/cf-probe.sh
+rm -f /etc/systemd/system/cf-probe.service /usr/local/bin/cf-probe.sh
 systemctl daemon-reload
+
 ```
 
-## 📄 License
-MIT License
+
+
+
+* **Alpine Linux**:
+  ```bash
+  rc-service cf-probe stop
+  rc-update del cf-probe default
+  rm -f /etc/init.d/cf-probe /usr/local/bin/cf-probe.sh
+
+
+
+* **Windows (PowerShell 管理员模式)**:
+```powershell
+Stop-ScheduledTask -TaskName CFProbeAgent -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName CFProbeAgent -Confirm:$false -ErrorAction SilentlyContinue
+Remove-Item -Path C:\ProgramData\CFProbe -Recurse -Force -ErrorAction SilentlyContinue
+
+```
+
+
+
+
+*(注：卸载后请在探针后台列表中点击“删除节点”以清理大盘显示。)*
+
+---
+
+## 🤝 参与贡献与协议
+
+本项目由纯 Serverless 爱好者开发，功能持续迭代中。
+如果你喜欢这个项目，欢迎提交 PR，或者给个 ⭐ **Star** 支持一下！
+
+**License**: MIT License
+
+```
