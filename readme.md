@@ -19,7 +19,7 @@
 演示站点已经使用本页提供的CSS个性化代码美化设置，只想简单探针可以不用个性化的CSS代码，直接用默认主题就行
 
 ### 1. 前台多节点大盘与单节点实时性能折线图
-<img width="3840" height="1765" alt="image" src="https://github.com/user-attachments/assets/6230258f-321e-4807-80d8-7a5b44c8c914" />
+<img width="3840" height="1738" alt="image" src="https://github.com/user-attachments/assets/aee57ca7-6123-4aa6-adb7-fe132c64cd06" />
 <img width="3840" height="1765" alt="image" src="https://github.com/user-attachments/assets/084d95c1-2f8b-44a0-87ff-ed43a8accc09" />
 <img width="3840" height="1765" alt="image" src="https://github.com/user-attachments/assets/31803b80-ffa5-4a3e-a589-c972d24836cc" />
 
